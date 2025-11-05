@@ -1,0 +1,5 @@
+# Core dependencies only (no FastAPI - we use JSON-RPC)
+python-dotenv
+requests
+numpy
+sentence-transformers

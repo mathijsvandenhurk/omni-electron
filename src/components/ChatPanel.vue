@@ -1,0 +1,644 @@
+<template>
+  <div class="chat-panel">
+    <div class="chat-header">
+      <div class="header-left">
+        <h3>Chat met Omni</h3>
+        <span v-if="commandHistory.length > 0" class="history-indicator">
+          📚 {{ commandHistory.length }}/{{ maxHistorySize }} history
+        </span>
+      </div>
+      <button @click="clearChat" class="clear-button" title="Wis chat geschiedenis en command history">
+        🗑️ Wissen
+      </button>
+    </div>
+    
+    <div class="messages" ref="messagesContainer">
+      <div
+        v-for="(msg, index) in messages"
+        :key="index"
+        class="message"
+        :class="msg.role"
+      >
+        <div class="message-header">
+          <strong>{{ msg.role === 'user' ? 'You' : 'Omni' }}</strong>
+          <span class="timestamp">{{ formatTime(msg.timestamp) }}</span>
+        </div>
+        <div class="message-content">{{ msg.content }}</div>
+      </div>
+
+      <div v-if="loading" class="message assistant loading">
+        <div class="message-header">
+          <strong>Omni</strong>
+        </div>
+        <div class="message-content">
+          <span class="typing-indicator">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <textarea
+        ref="inputTextarea"
+        v-model="inputMessage"
+        @keydown.enter.exact.prevent="sendMessage"
+        @keydown.shift.enter.prevent="handleShiftEnter"
+        @keydown.up="handleArrowUp"
+        @keydown.down="handleArrowDown"
+        placeholder="Type a message... (Enter to send, Shift+Enter for new line, ↑↓ voor history)"
+        :disabled="loading"
+        class="message-input"
+        rows="5"
+      />
+      <button @click="sendMessage" :disabled="loading || !inputMessage.trim()" class="send-button">
+        Send
+      </button>
+      <button @click="abortRequest" :disabled="!loading" class="abort-button" title="Stop huidige actie">
+        ⏹️ Stop
+      </button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, nextTick, watch } from 'vue';
+
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
+// Load messages from localStorage on component creation
+const loadMessages = (): Message[] => {
+  try {
+    const saved = localStorage.getItem('omni-chat-messages');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      return parsed.map((msg: any) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp)
+      }));
+    }
+  } catch (error) {
+    console.warn('Failed to load chat messages from localStorage:', error);
+  }
+  
+  // Default welcome message
+  return [{
+    role: 'assistant',
+    content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
+    timestamp: new Date()
+  }];
+};
+
+const messages = ref<Message[]>(loadMessages());
+
+// Save messages to localStorage when they change
+watch(messages, (newMessages) => {
+  try {
+    localStorage.setItem('omni-chat-messages', JSON.stringify(newMessages));
+  } catch (error) {
+    console.warn('Failed to save chat messages to localStorage:', error);
+  }
+}, { deep: true });
+
+// HMR detection and preservation
+if ((import.meta as any).hot) {
+  (import.meta as any).hot.on('vite:beforeUpdate', () => {
+    console.log('💾 HMR update detected - chat state will be preserved');
+  });
+}
+
+const inputMessage = ref('');
+const loading = ref(false);
+const messagesContainer = ref<HTMLElement | null>(null);
+const inputTextarea = ref<HTMLTextAreaElement | null>(null);
+
+// Command history management
+const commandHistory = ref<string[]>([]);
+const historyIndex = ref(-1);
+const maxHistorySize = 30;
+
+// Load command history from localStorage
+const loadCommandHistory = (): string[] => {
+  try {
+    const saved = localStorage.getItem('omni-command-history');
+    return saved ? JSON.parse(saved) : [];
+  } catch (error) {
+    console.warn('Failed to load command history:', error);
+    return [];
+  }
+};
+
+// Save command history to localStorage
+const saveCommandHistory = (history: string[]) => {
+  try {
+    localStorage.setItem('omni-command-history', JSON.stringify(history));
+  } catch (error) {
+    console.warn('Failed to save command history:', error);
+  }
+};
+
+// Initialize command history
+commandHistory.value = loadCommandHistory();
+
+// Add command to history
+const addToHistory = (command: string) => {
+  const trimmedCommand = command.trim();
+  if (trimmedCommand && commandHistory.value[0] !== trimmedCommand) {
+    commandHistory.value.unshift(trimmedCommand);
+    
+    // Limit history size
+    if (commandHistory.value.length > maxHistorySize) {
+      commandHistory.value = commandHistory.value.slice(0, maxHistorySize);
+    }
+    
+    saveCommandHistory(commandHistory.value);
+  }
+  historyIndex.value = -1; // Reset to latest
+};
+
+// Navigate through history
+const navigateHistory = (direction: 'up' | 'down') => {
+  if (commandHistory.value.length === 0) return;
+  
+  if (direction === 'up') {
+    if (historyIndex.value < commandHistory.value.length - 1) {
+      historyIndex.value++;
+      inputMessage.value = commandHistory.value[historyIndex.value];
+    }
+  } else if (direction === 'down') {
+    if (historyIndex.value > 0) {
+      historyIndex.value--;
+      inputMessage.value = commandHistory.value[historyIndex.value];
+    } else if (historyIndex.value === 0) {
+      historyIndex.value = -1;
+      inputMessage.value = '';
+    }
+  }
+};
+
+// Activity tracking voor timeout management
+const lastProgressTime = ref(Date.now());
+const progressUpdates = ref<string[]>([]);
+
+// Setup progress listener met activity tracking
+if (window.electronAPI?.onChatProgress) {
+  window.electronAPI.onChatProgress(async (progressMessage: string) => {
+    // Debug logging
+    console.log('🔄 Progress received:', progressMessage);
+    console.warn('🔍 FRONTEND DEBUG: Progress message received in ChatPanel:', progressMessage);
+    
+    // Update activity timestamp
+    lastProgressTime.value = Date.now();
+    
+    // Store progress update
+    progressUpdates.value.push(progressMessage);
+    
+    // Find the last assistant message and show progress IMMEDIATELY
+    const lastMsg = messages.value[messages.value.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant' && loading.value) {
+      console.log('📝 Adding progress to message:', lastMsg.content.length, 'chars existing');
+      console.warn('🔍 FRONTEND DEBUG: Adding to chat message');
+      
+      // PERMANENTLY add progress - never replace, always append
+      if (!lastMsg.content.endsWith('\n')) {
+        lastMsg.content += '\n';
+      }
+      lastMsg.content += `**${progressMessage}**\n`;
+      
+      await nextTick();
+      scrollToBottom();
+      
+      console.log('✅ Progress permanently added, new length:', lastMsg.content.length);
+      console.warn('🔍 FRONTEND DEBUG: Progress added to chat, new content:', lastMsg.content);
+    } else {
+      console.warn('❌ No assistant message found or not loading:', {
+        hasLastMsg: !!lastMsg,
+        role: lastMsg?.role,
+        loading: loading.value
+      });
+    }
+  });
+}
+
+const sendMessage = async () => {
+  const message = inputMessage.value.trim();
+  if (!message || loading.value) return;
+
+  // Add to command history
+  addToHistory(message);
+
+  // Add user message
+  messages.value.push({
+    role: 'user',
+    content: message,
+    timestamp: new Date()
+  });
+
+  inputMessage.value = '';
+  loading.value = true;
+
+  // Scroll to bottom
+  await nextTick();
+  scrollToBottom();
+
+  // Add placeholder for assistant message
+  const assistantMessageIndex = messages.value.length;
+  messages.value.push({
+    role: 'assistant',
+    content: '',
+    timestamp: new Date()
+  });
+
+  let responseStarted = false;
+
+  try {
+    // Call Python backend via Electron IPC met verbeterde timeout handling
+    const startTime = Date.now();
+    const response: any = await Promise.race([
+      window.electronAPI.chat(message),
+      new Promise((_, reject) => {
+        // Slimme timeout die checkt voor recente progress
+        const checkTimeout = () => {
+          const elapsed = Date.now() - startTime;
+          const sinceProgress = Date.now() - lastProgressTime.value;
+          
+          // Alleen timeout na 3 minuten met geen progress voor 45 seconden
+          if (elapsed > 180000 && sinceProgress > 45000) {
+            reject(new Error(`Request timeout after ${Math.round(elapsed/1000)}s (no progress for ${Math.round(sinceProgress/1000)}s)`));
+          } else {
+            setTimeout(checkTimeout, 10000); // Check every 10 seconds
+          }
+        };
+        setTimeout(checkTimeout, 10000);
+      })
+    ]);
+
+    if (response.success) {
+      const fullText = response.data?.answer || 'No response';
+      responseStarted = true;
+      
+      // Get existing progress content
+      const lastMsg = messages.value[assistantMessageIndex];
+      const existingProgress = lastMsg.content;
+      
+      // Add separator between progress and final response
+      const separator = existingProgress ? '\n\n---\n\n**Finale Response:**\n\n' : '';
+      
+      // Stream the final response letter by letter AFTER the progress
+      for (let i = 0; i <= fullText.length; i++) {
+        const finalContent = existingProgress + separator + fullText.substring(0, i);
+        messages.value[assistantMessageIndex].content = finalContent;
+        await new Promise(resolve => setTimeout(resolve, 10)); // 10ms delay per character
+        await nextTick();
+        scrollToBottom();
+      }
+    } else {
+      // For errors, also preserve existing progress
+      const lastMsg = messages.value[assistantMessageIndex];
+      const existingProgress = lastMsg.content;
+      const separator = existingProgress ? '\n\n---\n\n' : '';
+      messages.value[assistantMessageIndex].content = existingProgress + separator + `Error: ${response.error || 'Unknown error'}`;
+    }
+  } catch (error: any) {
+    console.error('Chat error:', error);
+    
+    // Better error handling with context  
+    let errorMessage = `Error: ${error?.message || 'Unknown error'}`;
+    if (error.message?.includes('timeout')) {
+      if (responseStarted) {
+        errorMessage = `⚠️ Response was taking too long, but Omni may still be working in the background. Try asking "What's your status?" in a few moments.`;
+      } else {
+        errorMessage = `⚠️ Request timeout - this usually means Omni is working on a complex task. The backend is still running and may complete soon.`;
+      }
+    }
+    
+    // Preserve existing progress in error case too
+    const lastMsg = messages.value[assistantMessageIndex];
+    const existingProgress = lastMsg.content;
+    const separator = existingProgress ? '\n\n---\n\n' : '';
+    messages.value[assistantMessageIndex].content = existingProgress + separator + errorMessage;
+  } finally {
+    loading.value = false;
+    await nextTick();
+    scrollToBottom();
+  }
+};
+
+const scrollToBottom = () => {
+  if (messagesContainer.value) {
+    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+  }
+};
+
+const abortRequest = () => {
+  // Set loading to false to stop the current request
+  loading.value = false;
+  
+  // Add a system message indicating the request was stopped
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant') {
+    lastMsg.content += '\n\n⚠️ Request gestopt door gebruiker.';
+  }
+  
+  console.log('🛑 Request aborted by user');
+};
+
+const clearChat = () => {
+  const welcomeMessage: Message = {
+    role: 'assistant',
+    content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
+    timestamp: new Date()
+  };
+  messages.value = [welcomeMessage];
+  localStorage.removeItem('omni-chat-messages');
+  
+  // Also clear command history
+  commandHistory.value = [];
+  historyIndex.value = -1;
+  localStorage.removeItem('omni-command-history');
+};
+
+const handleShiftEnter = () => {
+  // Get current cursor position
+  const textarea = inputTextarea.value;
+  if (textarea) {
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    
+    // Insert newline at cursor position
+    const value = inputMessage.value;
+    inputMessage.value = value.substring(0, start) + '\n' + value.substring(end);
+    
+    // Restore cursor position after the newline
+    nextTick(() => {
+      textarea.selectionStart = textarea.selectionEnd = start + 1;
+      textarea.focus();
+    });
+  }
+};
+
+const handleArrowUp = (event: KeyboardEvent) => {
+  const textarea = inputTextarea.value;
+  if (textarea) {
+    // Only navigate history if cursor is at the first line
+    const cursorPos = textarea.selectionStart;
+    const textBeforeCursor = inputMessage.value.substring(0, cursorPos);
+    const isFirstLine = !textBeforeCursor.includes('\n');
+    
+    if (isFirstLine) {
+      event.preventDefault();
+      navigateHistory('up');
+    }
+  }
+};
+
+const handleArrowDown = (event: KeyboardEvent) => {
+  const textarea = inputTextarea.value;
+  if (textarea) {
+    // Only navigate history if cursor is at the last line  
+    const cursorPos = textarea.selectionStart;
+    const textAfterCursor = inputMessage.value.substring(cursorPos);
+    const isLastLine = !textAfterCursor.includes('\n');
+    
+    if (isLastLine) {
+      event.preventDefault();
+      navigateHistory('down');
+    }
+  }
+};
+
+const formatTime = (date: Date) => {
+  return date.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
+</script>
+
+<style scoped>
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background: #1e1e1e;
+}
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: #0066cc;
+  border-bottom: 1px solid #3e3e42;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.chat-header h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.history-indicator {
+  font-size: 0.75rem;
+  color: #888;
+  background: #3e3e42;
+  padding: 0.25rem 0.5rem;
+  border-radius: 12px;
+}
+
+.clear-button {
+  padding: 0.25rem 0.5rem;
+  background: #3e3e42;
+  color: #d4d4d4;
+  border: 1px solid #555;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.clear-button:hover {
+  background: #505050;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.message {
+  padding: 1rem;
+  border-radius: 8px;
+  max-width: 80%;
+}
+
+.message.user {
+  background: #2d2d30;
+  align-self: flex-end;
+  border: 1px solid #3e3e42;
+}
+
+.message.assistant {
+  background: #252526;
+  align-self: flex-start;
+  border: 1px solid #3e3e42;
+}
+
+.message.loading {
+  opacity: 0.7;
+}
+
+.message-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.message-header strong {
+  color: #4ec9b0;
+}
+
+.timestamp {
+  color: #858585;
+  font-size: 0.75rem;
+}
+
+.message-content {
+  color: #00ffff !important;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  padding-bottom: 2rem;
+}
+
+.typing-indicator {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem 0;
+}
+
+.typing-indicator span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ec9b0;
+  animation: typing 1.4s infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typing {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.7;
+  }
+  30% {
+    transform: translateY(-10px);
+    opacity: 1;
+  }
+}
+
+.input-area {
+  display: flex;
+  gap: 0.5rem;
+  padding: 1rem;
+  background: #252526;
+  border-top: 1px solid #3e3e42;
+}
+
+.message-input {
+  flex: 1;
+  padding: 0.75rem;
+  border: 1px solid #3e3e42;
+  border-radius: 4px;
+  background: #1e1e1e;
+  color: #00ffff;
+  font-size: 1rem;
+  font-family: inherit;
+  min-height: 2.5rem;
+  max-height: 200px;
+  height: auto;
+  resize: vertical;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.message-input:focus {
+  outline: none;
+  border-color: #007acc;
+}
+
+.message-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.send-button {
+  padding: 0.75rem 1.5rem;
+  background: #007acc;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.send-button:hover:not(:disabled) {
+  background: #005a9e;
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.abort-button {
+  padding: 0.75rem 1rem;
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  margin-left: 0.5rem;
+}
+
+.abort-button:hover:not(:disabled) {
+  background: #c82333;
+}
+
+.abort-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+</style>

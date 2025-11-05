@@ -1,0 +1,57 @@
+{
+  "name": "omni-electron",
+  "version": "0.1.0",
+  "description": "Self-improving AI assistant - Electron desktop app",
+  "main": "electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "build": "vite build && electron-builder",
+    "build:linux": "vite build && electron-builder --linux",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "ai",
+    "assistant",
+    "electron",
+    "self-improving",
+    "autonomous"
+  ],
+  "author": "Mathijs van den Hurk",
+  "license": "MIT",
+  "dependencies": {
+    "vue": "^3.5.12"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.4",
+    "concurrently": "^9.0.1",
+    "dotenv": "^16.6.1",
+    "electron": "^33.0.2",
+    "electron-builder": "^25.1.7",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.1",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.mathijs.omni",
+    "productName": "Omni",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "backend/**/*"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icon.png"
+    }
+  }
+}

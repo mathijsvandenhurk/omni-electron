@@ -1,0 +1,131 @@
+<template>
+  <div class="app">
+    <header class="app-header">
+      <h1>Omni</h1>
+      <div class="status-badge" :class="statusClass">
+        {{ statusText }}
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div class="split-view">
+        <div class="left-panel">
+          <ChatPanel />
+        </div>
+        <div class="right-panel">
+          <Terminal />
+        </div>
+      </div>
+    </main>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import ChatPanel from './components/ChatPanel.vue';
+import Terminal from './components/Terminal.vue';
+
+const statusText = ref('Initializing...');
+const statusClass = ref('loading');
+
+onMounted(async () => {
+  try {
+    const response = await window.electronAPI.getStatus();
+    if (response.success && response.data?.pythonReady) {
+      statusText.value = 'Ready';
+      statusClass.value = 'ready';
+    } else {
+      statusText.value = 'Backend Starting...';
+      statusClass.value = 'loading';
+      
+      // Retry after 2 seconds
+      setTimeout(async () => {
+        const retry = await window.electronAPI.getStatus();
+        if (retry.success && retry.data?.pythonReady) {
+          statusText.value = 'Ready';
+          statusClass.value = 'ready';
+        }
+      }, 2000);
+    }
+  } catch (error) {
+    statusText.value = 'Error';
+    statusClass.value = 'error';
+    console.error('Failed to get status:', error);
+  }
+});
+</script>
+
+<style scoped>
+.app {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.5rem;
+  background: #252526;
+  border-bottom: 1px solid #3e3e42;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.status-badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.status-badge.ready {
+  background: #10b981;
+  color: white;
+}
+
+.status-badge.loading {
+  background: #f59e0b;
+  color: white;
+}
+
+.status-badge.error {
+  background: #ef4444;
+  color: white;
+}
+
+.app-main {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  gap: 0;
+}
+
+.split-view {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.left-panel {
+  flex: 1;
+  min-width: 0;
+  border-right: 1px solid #3e3e42;
+}
+
+.right-panel {
+  width: 500px;
+  min-width: 300px;
+  max-width: 50%;
+  background: #1e1e1e;
+}
+</style>
