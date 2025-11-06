@@ -12,6 +12,8 @@ dotenv.config({ path: path.join(__dirname, '../.env') });
 
 // Security & Performance: Configure Electron before app ready
 app.commandLine.appendSwitch('--no-sandbox');
+app.commandLine.appendSwitch('--disable-setuid-sandbox');
+app.commandLine.appendSwitch('--disable-dev-shm-usage'); // Fix /dev/shm issues
 app.commandLine.appendSwitch('--disable-web-security');
 app.commandLine.appendSwitch('--disable-features', 'VizDisplayCompositor');
 app.commandLine.appendSwitch('--enable-gpu-rasterization');
@@ -70,7 +72,7 @@ function createWindow() {
     // Performance optimizations
     show: false, // Don't show until ready-to-show
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       // Additional security and performance settings
@@ -84,8 +86,8 @@ function createWindow() {
       v8CacheOptions: 'code' // Enable V8 code caching
     },
     // Window performance options
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    icon: path.join(__dirname, '../build/icon.png')
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default'
+    // icon: path.join(__dirname, '../build/icon.png') // Commented out until icon is added
   });
 
   // Optimize window loading - show only when ready
@@ -108,6 +110,20 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  // Set Content Security Policy for better security
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          isDev 
+            ? "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:*;" 
+            : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+        ]
+      }
+    });
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;

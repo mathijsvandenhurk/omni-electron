@@ -3,6 +3,7 @@
     <header class="app-header">
       <h1>Omni</h1>
       <div class="header-controls">
+        <ThemeToggle />
         <button 
           @click="showFileExplorer = !showFileExplorer" 
           class="toggle-btn"
@@ -53,6 +54,7 @@
 <script setup lang="ts">
 import { ref, defineAsyncComponent } from 'vue';
 import { useSystem } from './composables/useSystem';
+import ThemeToggle from './components/ThemeToggle.vue';
 
 // Lazy load components for better startup performance
 const ChatPanel = defineAsyncComponent(() => import('./components/ChatPanel.vue'));
@@ -70,74 +72,79 @@ const showFileExplorer = ref(false);
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
 }
 
 .app-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1rem 1.5rem;
-  background: #252526;
-  border-bottom: 1px solid #3e3e42;
+  padding: var(--space-4) var(--space-6);
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+  box-shadow: var(--shadow-sm);
 }
 
 .app-header h1 {
   margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: #ffffff;
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
 }
 
 .header-controls {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: var(--space-3);
 }
 
 .toggle-btn {
-  padding: 0.375rem 0.75rem;
-  border: 1px solid #3e3e42;
-  border-radius: 6px;
-  background: #2d2d30;
-  color: #d4d4d4;
-  font-size: 0.875rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all var(--transition-fast);
 }
 
 .toggle-btn:hover {
-  background: #3e3e42;
-  border-color: #555;
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-dark);
+  transform: translateY(-1px);
 }
 
 .toggle-btn.active {
-  background: #0e639c;
-  border-color: #0e639c;
-  color: white;
+  background: var(--color-primary);
+  border-color: var(--color-primary-dark);
+  color: var(--color-white);
 }
 
 .status-badge {
-  padding: 0.25rem 0.75rem;
-  border-radius: 12px;
-  font-size: 0.875rem;
-  font-weight: 500;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
 }
 
 .status-badge.ready {
-  background: #10b981;
-  color: white;
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid var(--color-success-border);
 }
 
 .status-badge.loading {
-  background: #f59e0b;
-  color: white;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-border);
 }
 
 .status-badge.error {
-  background: #ef4444;
-  color: white;
+  background: var(--color-error-bg);
+  color: var(--color-error);
+  border: 1px solid var(--color-error-border);
 }
 
 .app-main {
@@ -157,21 +164,21 @@ const showFileExplorer = ref(false);
   width: 250px;
   min-width: 200px;
   max-width: 300px;
-  background: #252526;
-  border-right: 1px solid #3e3e42;
+  background: var(--color-bg-secondary);
+  border-right: 1px solid var(--color-border-light);
 }
 
 .left-panel {
   flex: 1;
   min-width: 0;
-  border-right: 1px solid #3e3e42;
+  border-right: 1px solid var(--color-border-light);
 }
 
 .right-panel {
   width: 500px;
   min-width: 300px;
   max-width: 50%;
-  background: #1e1e1e;
+  background: var(--color-bg-primary);
 }
 
 .loading-placeholder {
@@ -179,7 +186,7 @@ const showFileExplorer = ref(false);
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #888;
+  color: var(--color-text-muted);
   font-style: italic;
 }
 </style>

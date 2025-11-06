@@ -34,6 +34,11 @@ export class ElectronChatRepository implements IChatRepository {
   }
 
   onProgress(callback: (progress: MessageProgress) => void): void {
+    if (!window.electronAPI?.onChatProgress) {
+      console.warn('electronAPI.onChatProgress not available');
+      return;
+    }
+    
     window.electronAPI.onChatProgress((message: string) => {
       callback({
         messageId: Date.now().toString(),
@@ -44,8 +49,10 @@ export class ElectronChatRepository implements IChatRepository {
   }
 
   removeProgressListener(): void {
-    // For now, we'll use the IPC renderer to remove listeners
-    // This can be enhanced when the preload script is updated
-    console.log('Progress listener cleanup requested');
+    if (!window.electronAPI?.removeChatProgressListener) {
+      console.warn('electronAPI.removeChatProgressListener not available');
+      return;
+    }
+    window.electronAPI.removeChatProgressListener();
   }
 }

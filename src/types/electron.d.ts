@@ -7,6 +7,8 @@ export interface ElectronAPI {
   listFiles: (path: string) => Promise<FilesResponse>;
   onChatProgress: (callback: (message: string) => void) => void;
   onTerminalLog: (callback: (data: { type: string; message: string }) => void) => void;
+  removeChatProgressListener: () => void;
+  removeTerminalLogListener: () => void;
   platform: string;
 }
 
