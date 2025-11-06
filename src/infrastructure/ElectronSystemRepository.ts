@@ -24,6 +24,11 @@ export class ElectronSystemRepository implements ISystemRepository {
   }
 
   onTerminalLog(callback: (log: TerminalLog) => void): void {
+    if (!window.electronAPI?.onTerminalLog) {
+      console.warn('electronAPI.onTerminalLog not available');
+      return;
+    }
+    
     window.electronAPI.onTerminalLog((data: any) => {
       callback({
         id: Date.now().toString(),
@@ -36,8 +41,10 @@ export class ElectronSystemRepository implements ISystemRepository {
   }
 
   removeTerminalLogListener(): void {
-    // For now, we'll use the IPC renderer to remove listeners
-    // This can be enhanced when the preload script is updated
-    console.log('Terminal log listener cleanup requested');
+    if (!window.electronAPI?.removeTerminalLogListener) {
+      console.warn('electronAPI.removeTerminalLogListener not available');
+      return;
+    }
+    window.electronAPI.removeTerminalLogListener();
   }
 }
