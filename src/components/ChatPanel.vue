@@ -64,7 +64,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch } from 'vue';
+import { ref, nextTick, watch, onMounted } from 'vue';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -108,8 +108,8 @@ watch(messages, (newMessages) => {
 
 // HMR detection and preservation
 if ((import.meta as any).hot) {
-  (import.meta as any).hot.on('vite:beforeUpdate', () => {
-    console.log('💾 HMR update detected - chat state will be preserved');
+  onMounted(async () => {
+  // HMR preservation logic
   });
 }
 
@@ -186,13 +186,9 @@ const navigateHistory = (direction: 'up' | 'down') => {
 const lastProgressTime = ref(Date.now());
 const progressUpdates = ref<string[]>([]);
 
-// Setup progress listener met activity tracking
+// Setup progress listener
 if (window.electronAPI?.onChatProgress) {
   window.electronAPI.onChatProgress(async (progressMessage: string) => {
-    // Debug logging
-    console.log('🔄 Progress received:', progressMessage);
-    console.warn('🔍 FRONTEND DEBUG: Progress message received in ChatPanel:', progressMessage);
-    
     // Update activity timestamp
     lastProgressTime.value = Date.now();
     
@@ -202,9 +198,6 @@ if (window.electronAPI?.onChatProgress) {
     // Find the last assistant message and show progress IMMEDIATELY
     const lastMsg = messages.value[messages.value.length - 1];
     if (lastMsg && lastMsg.role === 'assistant' && loading.value) {
-      console.log('📝 Adding progress to message:', lastMsg.content.length, 'chars existing');
-      console.warn('🔍 FRONTEND DEBUG: Adding to chat message');
-      
       // PERMANENTLY add progress - never replace, always append
       if (!lastMsg.content.endsWith('\n')) {
         lastMsg.content += '\n';
@@ -213,15 +206,6 @@ if (window.electronAPI?.onChatProgress) {
       
       await nextTick();
       scrollToBottom();
-      
-      console.log('✅ Progress permanently added, new length:', lastMsg.content.length);
-      console.warn('🔍 FRONTEND DEBUG: Progress added to chat, new content:', lastMsg.content);
-    } else {
-      console.warn('❌ No assistant message found or not loading:', {
-        hasLastMsg: !!lastMsg,
-        role: lastMsg?.role,
-        loading: loading.value
-      });
     }
   });
 }
@@ -345,8 +329,6 @@ const abortRequest = () => {
   if (lastMsg && lastMsg.role === 'assistant') {
     lastMsg.content += '\n\n⚠️ Request gestopt door gebruiker.';
   }
-  
-  console.log('🛑 Request aborted by user');
 };
 
 const clearChat = () => {

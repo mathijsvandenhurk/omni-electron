@@ -3,3 +3,6 @@ python-dotenv
 requests
 numpy
 sentence-transformers
+
+# Async optimizations
+aiofiles>=23.0.0

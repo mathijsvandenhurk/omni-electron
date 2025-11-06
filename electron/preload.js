@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+import { contextBridge, ipcRenderer } from 'electron';
 
 /**
  * Electron Preload Script
@@ -31,6 +31,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getStatus: () => ipcRenderer.invoke('get-status'),
 
   /**
+   * List files in a directory
+   * @param {string} path - Directory path to list
+   * @returns {Promise<{success: boolean, data?: {files: string[]}, error?: string}>}
+   */
+  listFiles: (path) => ipcRenderer.invoke('list-files', path),
+
+  /**
    * Listen for chat progress updates
    * @param {function} callback - Called with progress message
    */
@@ -49,7 +56,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * Platform information
    */
-  platform: process.platform
-});
+  platform: process.platform,
 
-console.log('[Preload] Electron API exposed to renderer');
+  /**
+   * Remove chat progress listener
+   */
+  removeChatProgressListener: () => {
+    ipcRenderer.removeAllListeners('chat-progress');
+  },
+
+  /**
+   * Remove terminal log listener
+   */
+  removeTerminalLogListener: () => {
+    ipcRenderer.removeAllListeners('terminal-log');
+  }
+});
