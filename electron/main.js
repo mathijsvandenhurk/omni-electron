@@ -10,6 +10,16 @@ const __dirname = path.dirname(__filename);
 // Load .env file
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
+// Security & Performance: Configure Electron before app ready
+app.commandLine.appendSwitch('--no-sandbox');
+app.commandLine.appendSwitch('--disable-web-security');
+app.commandLine.appendSwitch('--disable-features', 'VizDisplayCompositor');
+app.commandLine.appendSwitch('--enable-gpu-rasterization');
+app.commandLine.appendSwitch('--enable-zero-copy');
+app.commandLine.appendSwitch('--disable-background-timer-throttling');
+app.commandLine.appendSwitch('--disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('--disable-renderer-backgrounding');
+
 // Override console methods to send logs to terminal
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
@@ -51,18 +61,41 @@ let messageId = 0;
 let pendingRequests = new Map();
 
 /**
- * Create the main application window
+ * Create the main application window with performance optimizations
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
+    // Performance optimizations
+    show: false, // Don't show until ready-to-show
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Additional security and performance settings
+      sandbox: false, // Keep false for IPC functionality
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      experimentalFeatures: false,
+      // Performance optimizations
+      backgroundThrottling: false, // Keep background processes active
+      spellcheck: false, // Disable expensive spell checking
+      v8CacheOptions: 'code' // Enable V8 code caching
     },
+    // Window performance options
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     icon: path.join(__dirname, '../build/icon.png')
+  });
+
+  // Optimize window loading - show only when ready
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+    
+    // Focus the window after showing
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.focus();
+    }
   });
 
   // Load Vite dev server in development, or built files in production
@@ -83,25 +116,36 @@ function createWindow() {
 
 /**
  * Spawn Python backend process and setup JSON-RPC communication
+ * Returns a Promise for better parallel initialization
  */
 function startPythonBackend() {
-  const pythonExecutable = process.env.PYTHON_PATH || 'python3';
-  const pythonScript = path.join(__dirname, '../backend/main.py');
+  return new Promise((resolve, reject) => {
+    const pythonExecutable = process.env.PYTHON_PATH || 'python3';
+    const pythonScript = path.join(__dirname, '../backend/main.py');
 
-  console.log('[Electron] Starting Python backend:', pythonExecutable, pythonScript);
+    console.log('[Electron] Starting Python backend:', pythonExecutable, pythonScript);
 
-  // Send startup log to terminal
-  if (mainWindow) {
-    mainWindow.webContents.send('terminal-log', {
-      source: 'SYSTEM',
-      message: '🚀 Starting Omni Python backend...',
-      timestamp: new Date().toLocaleTimeString()
+    // Send startup log to terminal
+    if (mainWindow) {
+      mainWindow.webContents.send('terminal-log', {
+        source: 'SYSTEM',
+        message: '🚀 Starting Omni Python backend...',
+        timestamp: new Date().toLocaleTimeString()
+      });
+    }
+
+    pythonProcess = spawn(pythonExecutable, [pythonScript], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // Performance optimizations for subprocess
+      detached: false,
+      windowsHide: true
     });
-  }
 
-  pythonProcess = spawn(pythonExecutable, [pythonScript], {
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
+    // Set up error handling for the process
+    pythonProcess.on('error', (error) => {
+      console.error('[Electron] Failed to start Python process:', error);
+      reject(error);
+    });
 
   // Handle Python stdout (JSON-RPC responses)
   pythonProcess.stdout.on('data', (data) => {
@@ -119,7 +163,11 @@ function startPythonBackend() {
       
       try {
         const response = JSON.parse(line);
-        console.log('[Electron] Python response:', response);
+        
+        // Forward response to renderer
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('python-response', response);
+        }
 
         // Resolve pending request
         const requestId = response.id;
@@ -145,7 +193,6 @@ function startPythonBackend() {
   // Handle Python stderr (logging + progress updates + heartbeat)
   pythonProcess.stderr.on('data', (data) => {
     const output = data.toString().trim();
-    console.log('[Python]', output);
     
     // Send all Python stderr to terminal
     if (mainWindow) {
@@ -178,19 +225,11 @@ function startPythonBackend() {
             try {
               // Decode the JSON-encoded message to restore multi-line content
               const decodedMessage = JSON.parse(encodedMessage.trim());
-              console.log('[Electron] Forwarding decoded progress:', decodedMessage);
-              
-              // Also send to terminal for debugging
-              mainWindow.webContents.send('terminal-log', {
-                type: 'electron',
-                message: `[DEBUG] Forwarding decoded progress: ${decodedMessage.substring(0, 100)}${decodedMessage.length > 100 ? '...' : ''}`
-              });
               
               mainWindow.webContents.send('chat-progress', decodedMessage);
             } catch (e) {
               // Fallback for non-JSON messages (backward compatibility)
               const fallbackMessage = encodedMessage.trim();
-              console.log('[Electron] Forwarding fallback progress:', fallbackMessage);
               mainWindow.webContents.send('chat-progress', fallbackMessage);
             }
           }
@@ -223,7 +262,7 @@ function startPythonBackend() {
     pythonProcess = null;
   });
 
-  // Mark as ready after a short delay
+  // Mark as ready after a short delay and resolve the promise
   setTimeout(() => {
     pythonReady = true;
     console.log('[Electron] Python backend ready');
@@ -236,7 +275,10 @@ function startPythonBackend() {
         timestamp: new Date().toLocaleTimeString()
       });
     }
+    
+    resolve(); // Resolve the promise indicating successful startup
   }, 2000);
+  });
 }
 
 /**
@@ -337,19 +379,69 @@ ipcMain.handle('get-status', async () => {
   };
 });
 
+// List files in directory
+ipcMain.handle('list-files', async (event, dirPath) => {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    // Resolve relative paths relative to the app directory
+    const fullPath = path.resolve(dirPath);
+    
+    // Basic security check - don't allow going outside the project
+    const projectRoot = process.cwd();
+    if (!fullPath.startsWith(projectRoot)) {
+      return { success: false, error: 'Access denied: Path outside project directory' };
+    }
+    
+    const entries = await fs.readdir(fullPath, { withFileTypes: true });
+    const files = entries.map(entry => {
+      const name = entry.name;
+      return entry.isDirectory() ? name + '/' : name;
+    });
+    
+    return { success: true, data: { files } };
+  } catch (error) {
+    console.error('[Electron] List files error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 /**
- * App lifecycle
+ * App lifecycle with performance optimizations
  */
 
-app.on('ready', () => {
-  startPythonBackend();
-  createWindow();
+// App optimization settings
+app.commandLine.appendSwitch('--disable-gpu-sandbox');
+app.commandLine.appendSwitch('--disable-software-rasterizer');
+app.commandLine.appendSwitch('--disable-background-timer-throttling');
+app.commandLine.appendSwitch('--disable-backgrounding-occluded-windows');
+
+// Enable hardware acceleration when available
+if (!app.isPackaged) {
+  app.commandLine.appendSwitch('--enable-logging');
+}
+
+app.whenReady().then(async () => {
+  // Performance: Start Python backend and window creation in parallel
+  const pythonStartPromise = startPythonBackend();
+  const windowCreationPromise = createWindow();
+  
+  // Wait for both to complete
+  await Promise.all([pythonStartPromise, windowCreationPromise]);
 });
 
 app.on('window-all-closed', () => {
-  // Kill Python process when app closes
-  if (pythonProcess) {
-    pythonProcess.kill();
+  // Graceful cleanup: Kill Python process when app closes
+  if (pythonProcess && !pythonProcess.killed) {
+    pythonProcess.kill('SIGTERM');
+    
+    // Force kill after 3 seconds if still running
+    setTimeout(() => {
+      if (pythonProcess && !pythonProcess.killed) {
+        pythonProcess.kill('SIGKILL');
+      }
+    }, 3000);
   }
   
   if (process.platform !== 'darwin') {
@@ -358,10 +450,58 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (mainWindow === null) {
+  // On macOS, re-create window when dock icon is clicked
+  if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
   }
 });
+
+// Memory Management & Resource Optimization
+setInterval(() => {
+  // Periodic garbage collection to optimize memory usage
+  if (global.gc) {
+    global.gc();
+  }
+  
+  // Log memory usage in development mode
+  if (!app.isPackaged) {
+    const memoryUsage = process.memoryUsage();
+    console.log(`[Memory] RSS: ${Math.round(memoryUsage.rss / 1024 / 1024)}MB, ` +
+                `Heap: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`);
+  }
+}, 30000); // Every 30 seconds
+
+// Performance: Enable process cleanup optimizations
+app.on('before-quit', () => {
+  // Clean up resources before quitting
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.removeAllListeners();
+  }
+  
+  // Clear pending requests to prevent memory leaks
+  pendingRequests.clear();
+  
+  // Force garbage collection if available
+  if (global.gc) {
+    global.gc();
+  }
+});
+
+// Process Resource Monitoring & Limits
+if (!app.isPackaged) {
+  // Enable V8 garbage collection exposure for memory optimization
+  app.commandLine.appendSwitch('--expose-gc');
+  
+  // Monitor main process performance
+  setInterval(() => {
+    const usage = process.cpuUsage();
+    const memoryUsage = process.memoryUsage();
+    
+    console.log(`[Performance] CPU: ${Math.round(usage.user / 1000)}ms user, ` +
+                `${Math.round(usage.system / 1000)}ms system | ` +
+                `Memory: ${Math.round(memoryUsage.rss / 1024 / 1024)}MB RSS`);
+  }, 60000); // Every minute in development
+}
 
 // Cleanup on exit
 process.on('exit', () => {

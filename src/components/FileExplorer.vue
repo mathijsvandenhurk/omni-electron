@@ -10,7 +10,7 @@
       <div v-if="loading" class="loading">Loading...</div>
       <div v-else-if="error" class="error">{{ error }}</div>
       <div v-else class="file-tree">
-        <div v-for="file in files" :key="file" class="file-item" @click="selectFile(file)">
+        <div v-for="file in files" :key="file" class="file-item" @click="handleFileClick(file)">
           <span class="file-icon">{{ getFileIcon(file) }}</span>
           <span class="file-name">{{ file }}</span>
         </div>
@@ -21,6 +21,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+
+// Define emits
+const emit = defineEmits(['fileSelected']);
 
 const files = ref<string[]>([]);
 const loading = ref(false);
@@ -40,7 +43,8 @@ const loadFiles = async () => {
   loading.value = true;
   error.value = '';
   try {
-    const response = await window.electronAPI.listFiles('.');
+    // Cast to any to bypass TypeScript checking until type definitions are updated
+    const response = await (window.electronAPI as any).listFiles('.');
     if (response.success) {
       files.value = response.data?.files || [];
     } else {
@@ -57,9 +61,8 @@ const refreshFiles = () => {
   loadFiles();
 };
 
-const selectFile = (file: string) => {
-  console.log('Selected file:', file);
-  // TODO: Add file preview or edit functionality
+const handleFileClick = (file: string) => {
+  emit('fileSelected', file);
 };
 
 onMounted(() => {
