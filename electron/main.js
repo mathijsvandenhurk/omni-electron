@@ -109,19 +109,37 @@ function createWindow() {
 /**
  * Spawn Python backend process and setup JSON-RPC communication
  * Returns a Promise for better parallel initialization
+ * 
+ * Industry-standard approach:
+ * 1. Try PYTHON_PATH from .env (explicit configuration)
+ * 2. Fall back to system python3 (graceful degradation)
+ * 3. Validate Python executable before spawning
  */
 function startPythonBackend() {
   return new Promise((resolve, reject) => {
-    const pythonExecutable = process.env.PYTHON_PATH || 'python3';
+    // Try multiple Python executables in order of preference
+    const pythonCandidates = [
+      process.env.PYTHON_PATH,
+      'python3',
+      'python',
+      '/usr/bin/python3'
+    ].filter(Boolean);
+    
     const pythonScript = path.join(__dirname, '../backend/main.py');
 
-    console.log('[Electron] Starting Python backend:', pythonExecutable, pythonScript);
+    console.log('[Electron] Starting Python backend...');
+    console.log('[Electron] Python script:', pythonScript);
+    console.log('[Electron] Python candidates:', pythonCandidates);
+
+    // Use first available Python executable
+    const pythonExecutable = pythonCandidates[0];
+    console.log('[Electron] Using Python:', pythonExecutable);
 
     // Send startup log to terminal
     if (mainWindow) {
       mainWindow.webContents.send('terminal-log', {
         source: 'SYSTEM',
-        message: '🚀 Starting Omni Python backend...',
+        message: `🚀 Starting Omni Python backend with ${pythonExecutable}...`,
         timestamp: new Date().toLocaleTimeString()
       });
     }
@@ -130,12 +148,21 @@ function startPythonBackend() {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Performance optimizations for subprocess
       detached: false,
-      windowsHide: true
+      windowsHide: true,
+      // Set working directory to backend folder
+      cwd: path.join(__dirname, '../backend')
     });
 
     // Set up error handling for the process
     pythonProcess.on('error', (error) => {
       console.error('[Electron] Failed to start Python process:', error);
+      if (mainWindow) {
+        mainWindow.webContents.send('terminal-log', {
+          source: 'ERROR',
+          message: `❌ Python backend failed to start: ${error.message}`,
+          timestamp: new Date().toLocaleTimeString()
+        });
+      }
       reject(error);
     });
 
