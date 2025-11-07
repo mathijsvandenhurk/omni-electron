@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Monaco Test</title>
+    <style>
+        body { margin: 0; padding: 0; }
+        #container { width: 100vw; height: 100vh; }
+    </style>
+</head>
+<body>
+    <h1>Testing Monaco in Electron</h1>
+    <div id="container"></div>
+    <div id="status"></div>
+
+    <script type="module">
+        const status = document.getElementById('status');
+        status.innerHTML = 'Loading Monaco...';
+
+        try {
+            // Test 1: Can we import Monaco?
+            const monaco = await import('monaco-editor');
+            status.innerHTML += '<br>✅ Monaco imported successfully';
+
+            // Test 2: Can we configure environment?
+            self.MonacoEnvironment = {
+                getWorker() {
+                    status.innerHTML += '<br>⚠️ Worker requested - returning null';
+                    return null;
+                }
+            };
+            status.innerHTML += '<br>✅ Environment configured';
+
+            // Test 3: Can we create an editor?
+            const editor = monaco.editor.create(document.getElementById('container'), {
+                value: 'console.log("Hello from Monaco!");',
+                language: 'javascript',
+                theme: 'vs-dark'
+            });
+            status.innerHTML += '<br>✅ Editor created';
+
+            // Test 4: Can we create a model?
+            const model = monaco.editor.createModel(
+                'const x = 42;',
+                'typescript',
+                monaco.Uri.parse('file:///test.ts')
+            );
+            status.innerHTML += '<br>✅ Model created: ' + model.uri.toString();
+
+            // Test 5: Can we switch models?
+            setTimeout(() => {
+                status.innerHTML += '<br>Switching model in 2 seconds...';
+                setTimeout(() => {
+                    try {
+                        editor.setModel(model);
+                        status.innerHTML += '<br>✅ Model switched successfully!';
+                    } catch (e) {
+                        status.innerHTML += '<br>❌ Model switch FAILED: ' + e.message;
+                    }
+                }, 2000);
+            }, 100);
+
+        } catch (error) {
+            status.innerHTML += '<br>❌ Error: ' + error.message;
+            console.error('Monaco test error:', error);
+        }
+    </script>
+</body>
+</html>

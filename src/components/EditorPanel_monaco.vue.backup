@@ -1,0 +1,470 @@
+<template>
+  <div class="editor-panel">
+    <!-- Tab Bar -->
+    <TabBar 
+      :tabs="openTabs"
+      :active-tab-uri="activeTabUri"
+      @select-tab="handleSelectTab"
+      @close-tab="handleCloseTab"
+      @close-other-tabs="handleCloseOtherTabs"
+      @close-tabs-to-right="handleCloseTabsToRight"
+      @close-all-tabs="handleCloseAllTabs"
+    />
+    
+    <!-- Monaco Editor Container -->
+    <div ref="editorContainer" class="monaco-container"></div>
+  </div>
+</template>
+
+<script setup lang="ts">
+// CRITICAL: Import monaco-env FIRST to configure environment before Monaco loads
+import '../monaco-env';
+
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
+import * as monaco from 'monaco-editor';
+import { useMonacoModels } from '../composables/useMonacoModels';
+import { setupMonacoThemes } from '../composables/useMonacoTheme';
+import TabBar from './TabBar.vue';
+
+// NOTE: Web workers are DISABLED via monaco-env.ts
+// This prevents "Creating shared memory failed" errors in Electron
+
+// Use model management system
+const modelManager = useMonacoModels();
+
+// Theme observer for automatic synchronization
+let themeObserver: MutationObserver | null = null;
+
+// Props
+interface Props {
+  theme?: 'light' | 'dark';
+  language?: string;
+  readOnly?: boolean;
+  modelUri?: string; // Optional: URI for the model to display
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  theme: 'dark',
+  language: 'typescript',
+  readOnly: false,
+  modelUri: 'file:///welcome.ts'
+});
+
+// Emits
+const emit = defineEmits<{
+  contentChange: [content: string];
+  selectionChange: [selection: string];
+  modelChange: [model: monaco.editor.ITextModel | null];
+}>();
+
+// Refs
+const editorContainer = ref<HTMLElement | null>(null);
+let editor: monaco.editor.IStandaloneCodeEditor | null = null;
+
+// Tab state - computed from model manager
+const openTabs = computed(() => {
+  return modelManager.listModels().map(info => ({
+    uri: info.uri.toString(),
+    isDirty: info.isDirty
+  }));
+});
+
+const activeTabUri = computed(() => modelManager.getActiveModelUri());
+
+// Setup language features - MINIMAL configuration to prevent worker usage
+const setupLanguageFeatures = () => {
+  // COMPLETELY DISABLE all language services that try to use workers
+  // This prevents the "Cannot read properties of null (reading 'postMessage')" errors
+  
+  // Disable TypeScript language features
+  monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+    noSemanticValidation: true,   // Disable ALL type checking
+    noSyntaxValidation: true,     // Disable ALL syntax checking  
+    noSuggestionDiagnostics: true, // Disable ALL suggestions
+    diagnosticCodesToIgnore: []   // Ignore all diagnostics
+  });
+  
+  monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+    noSemanticValidation: true,
+    noSyntaxValidation: true,
+    noSuggestionDiagnostics: true,
+    diagnosticCodesToIgnore: []
+  });
+  
+  // Disable eager model sync (prevents worker communication)
+  monaco.languages.typescript.typescriptDefaults.setEagerModelSync(false);
+  monaco.languages.typescript.javascriptDefaults.setEagerModelSync(false);
+  
+  // Disable HTML validation
+  try {
+    monaco.languages.html.htmlDefaults.setOptions({
+      suggest: { html5: false }
+    });
+  } catch (e) {
+    // Ignore if HTML defaults not available
+  }
+  
+  // Disable CSS validation
+  try {
+    monaco.languages.css.cssDefaults.setOptions({
+      validate: false
+    });
+  } catch (e) {
+    // Ignore if CSS defaults not available
+  }
+  
+  console.log('🔧 Language features configured (validation DISABLED to prevent worker errors)');
+};
+
+// Initialize Monaco Editor
+const initializeEditor = async () => {
+  if (!editorContainer.value) {
+    console.error('❌ Editor container not found');
+    return;
+  }
+
+  try {
+    // Setup language features (environment already configured via monaco-env.ts)
+    setupLanguageFeatures();
+    
+    // Create or get the initial model
+    const initialUri = props.modelUri;
+    let initialModel = modelManager.getModel(initialUri);
+    
+    if (!initialModel) {
+      // Create welcome model with TypeScript content
+      const welcomeContent = `// Welcome to Omni IDE
+// This is a full-featured code editor powered by Monaco Editor
+
+// Try some TypeScript features:
+interface User {
+  name: string;
+  age: number;
+}
+
+function greet(user: User): string {
+  return \`Hello, \${user.name}! You are \${user.age} years old.\`;
+}
+
+const user: User = {
+  name: "Developer",
+  age: 25
+};
+
+console.log(greet(user));
+
+// Features available:
+// - IntelliSense & autocomplete
+// - TypeScript type checking
+// - Syntax highlighting
+// - Multiple tabs
+// - And much more!
+`;
+      
+      initialModel = modelManager.createModel(initialUri, welcomeContent, 'typescript');
+    }
+
+    // Create editor instance
+    editor = monaco.editor.create(editorContainer.value, {
+      model: initialModel,
+      theme: props.theme === 'dark' ? 'omni-dark' : 'omni-light',
+      automaticLayout: true,
+      fontSize: 14,
+      lineNumbers: 'on',
+      minimap: {
+        enabled: true
+      },
+      scrollBeyondLastLine: false,
+      wordWrap: 'on',
+      readOnly: props.readOnly,
+      tabSize: 2,
+      insertSpaces: true,
+      detectIndentation: true,
+      folding: true,
+      bracketPairColorization: {
+        enabled: true
+      },
+      stickyScroll: {
+        enabled: true
+      }
+    });
+
+    // Set active model
+    modelManager.setActiveModel(initialUri);
+
+    // Setup event handlers
+    editor.onDidChangeModelContent(() => {
+      const value = editor?.getValue() || '';
+      emit('contentChange', value);
+      
+      // Mark model as dirty
+      const currentUri = modelManager.getActiveModelUri();
+      if (currentUri) {
+        const modelInfo = modelManager.getModelInfo(currentUri);
+        if (modelInfo) {
+          modelInfo.isDirty = true;
+        }
+      }
+    });
+
+    editor.onDidChangeCursorSelection(() => {
+      const selection = editor?.getModel()?.getValueInRange(editor.getSelection()!) || '';
+      emit('selectionChange', selection);
+    });
+
+    editor.onDidChangeModel(() => {
+      const model = editor?.getModel();
+      emit('modelChange', model || null);
+    });
+
+    console.log('✅ Monaco Editor initialized successfully');
+    console.log('📝 Active model:', initialUri);
+    console.log('📊 Total models:', modelManager.listModels().length);
+
+    // Setup themes (no editor parameter needed - themes are global)
+    setupMonacoThemes(null);
+    
+    // Watch for theme changes in the DOM
+    themeObserver = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.attributeName === 'data-theme') {
+          const newTheme = document.documentElement.getAttribute('data-theme');
+          if (editor) {
+            monaco.editor.setTheme(newTheme === 'dark' ? 'omni-dark' : 'omni-light');
+          }
+        }
+      });
+    });
+    
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme']
+    });
+    
+    console.log('🎨 Custom themes applied and watching for changes');
+  } catch (error) {
+    console.error('❌ Failed to initialize Monaco Editor:', error);
+    console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack trace');
+    throw error;
+  }
+};
+
+// Editor API methods
+const getValue = (): string => {
+  return editor?.getValue() || '';
+};
+
+const setValue = (value: string) => {
+  if (editor) {
+    editor.setValue(value);
+  }
+};
+
+const getSelection = (): string => {
+  const selection = editor?.getSelection();
+  if (!selection || !editor) return '';
+  return editor.getModel()?.getValueInRange(selection) || '';
+};
+
+const focus = () => {
+  editor?.focus();
+};
+
+// Open file in editor
+const openFile = (uri: string, content: string) => {
+  if (!editor) {
+    console.warn('⚠️ Cannot open file: editor not initialized');
+    return;
+  }
+
+  try {
+    // Detect language from URI
+    const language = modelManager.detectLanguage(uri);
+    
+    // Get or create model
+    let model = modelManager.getModel(uri);
+    if (!model) {
+      model = modelManager.createModel(uri, content, language);
+    }
+
+    // Set model in editor (SIMPLE - no workers means no timing issues)
+    editor.setModel(model);
+    
+    // Set as active model
+    modelManager.setActiveModel(uri);
+    
+    console.log(`📂 Opened file: ${uri} (${language})`);
+    console.log(`📊 Total models: ${modelManager.listModels().length}`);
+  } catch (error) {
+    console.error('❌ Error opening file:', error);
+    console.error('❌ Error stack:', error instanceof Error ? error.stack : 'No stack trace');
+    throw error; // Re-throw so FileExplorer can show error
+  }
+};
+
+// Tab event handlers
+const handleSelectTab = (uri: string) => {
+  if (!editor) {
+    console.warn('⚠️ Cannot select tab: editor not initialized');
+    return;
+  }
+  
+  try {
+    const model = modelManager.getModel(uri);
+    
+    if (!model) {
+      console.warn(`⚠️ Model not found for URI: ${uri}`);
+      return;
+    }
+    
+    const currentModel = editor.getModel();
+    
+    // Only switch if it's a different model
+    if (currentModel?.uri.toString() !== model.uri.toString()) {
+      // Without workers, we can switch directly - no timing issues
+      editor.setModel(model);
+      modelManager.setActiveModel(uri);
+      console.log(`🔄 Switched to tab: ${uri}`);
+    } else {
+      modelManager.setActiveModel(uri);
+    }
+  } catch (error) {
+    console.error('❌ Error switching tab:', error);
+  }
+};
+
+const handleCloseTab = (uri: string) => {
+  const tabs = openTabs.value;
+  const currentIndex = tabs.findIndex(t => t.uri === uri);
+  
+  // Check if we need to switch tabs BEFORE disposing
+  const shouldSwitchTab = uri === activeTabUri.value && tabs.length > 1;
+  let nextTabUri: string | null = null;
+  
+  if (shouldSwitchTab) {
+    // Calculate next tab to switch to BEFORE disposing
+    const nextIndex = currentIndex < tabs.length - 1 ? currentIndex : currentIndex - 1;
+    if (nextIndex >= 0 && tabs[nextIndex] && tabs[nextIndex].uri !== uri) {
+      nextTabUri = tabs[nextIndex].uri;
+    }
+  }
+  
+  // Switch to next tab BEFORE disposing the current one
+  if (nextTabUri && editor) {
+    const nextModel = modelManager.getModel(nextTabUri);
+    if (nextModel) {
+      editor.setModel(nextModel);
+      modelManager.setActiveModel(nextTabUri);
+    }
+  }
+  
+  // Now dispose the model
+  modelManager.disposeModel(uri);
+  
+  // If last tab closed, clear editor
+  if (tabs.length === 1 && editor) {
+    editor.setModel(null);
+  }
+  
+  console.log(`❌ Closed tab: ${uri}`);
+};
+
+const handleCloseOtherTabs = (uri: string) => {
+  const allTabs = openTabs.value;
+  allTabs.forEach(tab => {
+    if (tab.uri !== uri) {
+      modelManager.disposeModel(tab.uri);
+    }
+  });
+  
+  // Switch to the kept tab
+  handleSelectTab(uri);
+  console.log(`❌ Closed other tabs, kept: ${uri}`);
+};
+
+const handleCloseTabsToRight = (uri: string) => {
+  const allTabs = openTabs.value;
+  const index = allTabs.findIndex(t => t.uri === uri);
+  
+  if (index >= 0) {
+    const tabsToClose = allTabs.slice(index + 1);
+    tabsToClose.forEach(tab => {
+      modelManager.disposeModel(tab.uri);
+    });
+    console.log(`❌ Closed ${tabsToClose.length} tabs to the right`);
+  }
+};
+
+const handleCloseAllTabs = () => {
+  const count = openTabs.value.length;
+  modelManager.disposeAllModels();
+  editor?.setModel(null);
+  console.log(`❌ Closed all ${count} tabs`);
+};
+
+// Get model manager (for external access)
+const getModelManager = () => modelManager;
+
+// Get current model info
+const getCurrentModelInfo = () => {
+  const uri = modelManager.getActiveModelUri();
+  return uri ? modelManager.getModelInfo(uri) : null;
+};
+
+// Expose methods to parent
+defineExpose({
+  getValue,
+  setValue,
+  getSelection,
+  focus,
+  openFile,
+  getModelManager,
+  getCurrentModelInfo
+});
+
+// Lifecycle hooks
+onMounted(() => {
+  console.log('EditorPanel mounting...');
+  // Small delay to ensure DOM is ready
+  setTimeout(() => {
+    initializeEditor();
+  }, 100);
+});
+
+onBeforeUnmount(() => {
+  console.log('EditorPanel unmounting, disposing editor...');
+  
+  // Disconnect theme observer
+  if (themeObserver) {
+    themeObserver.disconnect();
+    themeObserver = null;
+    console.log('🎨 Theme observer disconnected');
+  }
+  
+  if (editor) {
+    editor.dispose();
+    editor = null;
+  }
+  
+  // Dispose all models
+  modelManager.disposeAllModels();
+  
+  console.log('✅ Editor disposed');
+});
+</script>
+
+<style scoped>
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-background-secondary);
+}
+
+.monaco-container {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+</style>

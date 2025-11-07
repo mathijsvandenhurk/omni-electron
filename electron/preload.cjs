@@ -38,6 +38,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listFiles: (path) => ipcRenderer.invoke('list-files', path),
 
   /**
+   * List files recursively (VS Code style - full tree in one call)
+   * @param {string} path - Directory path to scan
+   * @param {object} options - Options: maxDepth, excludePatterns
+   * @returns {Promise<{success: boolean, data?: {files: string[], tree: object[]}, error?: string}>}
+   */
+  listFilesRecursive: (path, options) => ipcRenderer.invoke('list-files-recursive', path, options),
+
+  /**
+   * Read file content
+   * @param {string} filePath - Path to the file to read
+   * @returns {Promise<{success: boolean, data?: {content: string, isBinary: boolean, path: string, size: number}, error?: string}>}
+   */
+  readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
+
+  /**
    * Listen for chat progress updates
    * @param {function} callback - Called with progress message
    */

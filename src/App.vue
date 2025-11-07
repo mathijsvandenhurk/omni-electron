@@ -8,8 +8,33 @@
           @click="showFileExplorer = !showFileExplorer" 
           class="toggle-btn"
           :class="{ active: showFileExplorer }"
+          title="Toggle File Explorer"
         >
           📁 Files
+        </button>
+        <button 
+          @click="showEditor = !showEditor" 
+          class="toggle-btn"
+          :class="{ active: showEditor }"
+          title="Toggle Code Editor"
+        >
+          📝 Editor
+        </button>
+        <button 
+          @click="showChat = !showChat" 
+          class="toggle-btn"
+          :class="{ active: showChat }"
+          title="Toggle Chat"
+        >
+          💬 Chat
+        </button>
+        <button 
+          @click="showTerminal = !showTerminal" 
+          class="toggle-btn"
+          :class="{ active: showTerminal }"
+          title="Toggle Terminal"
+        >
+          🖥️ Terminal
         </button>
         <div class="status-badge" :class="statusClass">
           {{ statusText }}
@@ -19,17 +44,50 @@
 
     <main class="app-main">
       <div class="split-view">
-        <!-- File Explorer (conditionally loaded) -->
+        <!-- File Explorer Panel -->
         <div v-if="showFileExplorer" class="file-panel">
           <Suspense>
-            <FileExplorer />
+            <FileExplorer @file-selected="handleFileSelected" />
             <template #fallback>
               <div class="loading-placeholder">Loading files...</div>
             </template>
           </Suspense>
         </div>
         
-        <div class="left-panel">
+        <!-- Code Editor Panel (NEW!) -->
+        <div v-if="showEditor" class="editor-panel">
+          <Suspense>
+            <EditorPanel 
+              ref="editorRef"
+              :theme="currentTheme"
+              @content-change="handleEditorChange"
+              @selection-change="handleSelectionChange"
+            />
+            <template #fallback>
+              <div class="loading-placeholder">Loading editor...</div>
+            </template>
+          </Suspense>
+          
+          <!-- Loading overlay when opening file -->
+          <div v-if="loadingFile" class="file-loading-overlay">
+            <div class="loading-spinner">
+              <div class="spinner"></div>
+              <p>Opening file...</p>
+            </div>
+          </div>
+          
+          <!-- Error message when file loading fails -->
+          <div v-if="fileError" class="file-error-overlay" @click="fileError = null">
+            <div class="error-message">
+              <span class="error-icon">⚠️</span>
+              <p>{{ fileError }}</p>
+              <button @click="fileError = null" class="dismiss-btn">Dismiss</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div v-if="showChat" class="chat-panel">
           <Suspense>
             <ChatPanel />
             <template #fallback>
@@ -38,7 +96,8 @@
           </Suspense>
         </div>
         
-        <div class="right-panel">
+        <!-- Terminal Panel -->
+        <div v-if="showTerminal" class="terminal-panel">
           <Suspense>
             <Terminal />
             <template #fallback>
@@ -52,7 +111,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, defineAsyncComponent } from 'vue';
+import { ref, defineAsyncComponent, computed } from 'vue';
 import { useSystem } from './composables/useSystem';
 import ThemeToggle from './components/ThemeToggle.vue';
 
@@ -60,10 +119,103 @@ import ThemeToggle from './components/ThemeToggle.vue';
 const ChatPanel = defineAsyncComponent(() => import('./components/ChatPanel.vue'));
 const Terminal = defineAsyncComponent(() => import('./components/Terminal.vue'));
 const FileExplorer = defineAsyncComponent(() => import('./components/FileExplorer.vue'));
+const EditorPanel = defineAsyncComponent(() => import('./components/EditorPanel.vue'));
 
 // Use Clean Architecture system composable
 const { statusText, statusClass } = useSystem();
+
+// Panel visibility controls
 const showFileExplorer = ref(false);
+const showEditor = ref(true); // Editor shown by default
+const showChat = ref(true); // Chat shown by default
+const showTerminal = ref(true); // Terminal shown by default
+
+// Editor ref for API access
+const editorRef = ref<InstanceType<typeof EditorPanel> | null>(null);
+
+// Theme sync with data-theme attribute
+const currentTheme = computed(() => {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+});
+
+// File loading state
+const loadingFile = ref(false);
+const fileError = ref<string | null>(null);
+
+// File selection handler - opens file in editor
+const handleFileSelected = async (filePath: string) => {
+  console.log('📂 Opening file:', filePath);
+  
+  // Skip if it's a directory
+  if (filePath.endsWith('/')) {
+    console.log('⚠️ Skipping directory:', filePath);
+    return;
+  }
+  
+  // Skip if editor is not visible
+  if (!showEditor.value) {
+    console.log('⚠️ Editor is not visible, showing it...');
+    showEditor.value = true;
+    // Wait a bit for editor to mount
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  
+  // Skip if editor is not ready
+  if (!editorRef.value) {
+    console.error('❌ Editor ref not available');
+    fileError.value = 'Editor is not ready yet';
+    return;
+  }
+  
+  loadingFile.value = true;
+  fileError.value = null;
+  
+  try {
+    // Read file content via Electron API
+    const response = await (window.electronAPI as any).readFile(filePath);
+    
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to read file');
+    }
+    
+    const content = response.data?.content || '';
+    const isBinary = response.data?.isBinary || false;
+    
+    // Handle binary files
+    if (isBinary) {
+      console.log('⚠️ Binary file detected:', filePath);
+      fileError.value = 'Cannot open binary file in text editor';
+      return;
+    }
+    
+    // Create URI for the file (use file:// protocol for real files)
+    const fileUri = `file:///${filePath}`;
+    
+    console.log('✅ File loaded, opening in editor:', fileUri);
+    
+    // Open file in editor (will create new tab or switch to existing)
+    editorRef.value.openFile(fileUri, content);
+    
+    console.log('✅ File opened successfully:', filePath);
+    
+  } catch (err: any) {
+    console.error('❌ Error opening file:', err);
+    fileError.value = err.message || 'Failed to open file';
+  } finally {
+    loadingFile.value = false;
+  }
+};
+
+// Editor event handlers
+const handleEditorChange = (content: string) => {
+  console.log('Editor content changed:', content.length, 'characters');
+};
+
+const handleSelectionChange = (selection: string) => {
+  if (selection) {
+    console.log('Selection changed:', selection.substring(0, 50) + '...');
+  }
+};
 </script>
 
 <style scoped>
@@ -84,6 +236,7 @@ const showFileExplorer = ref(false);
   background: var(--color-bg-secondary);
   border-bottom: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-sm);
+  z-index: 100;
 }
 
 .app-header h1 {
@@ -158,26 +311,154 @@ const showFileExplorer = ref(false);
   display: flex;
   width: 100%;
   height: 100%;
+  gap: 0;
 }
 
+/* File Explorer Panel */
 .file-panel {
   width: 250px;
   min-width: 200px;
-  max-width: 300px;
+  max-width: 400px;
   background: var(--color-bg-secondary);
   border-right: 1px solid var(--color-border-light);
+  overflow-y: auto;
 }
 
-.left-panel {
+/* Code Editor Panel (NEW!) */
+.editor-panel {
   flex: 1;
-  min-width: 0;
+  min-width: 400px;
+  background: var(--color-bg-primary);
+  border-right: 1px solid var(--color-border-light);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative; /* For overlay positioning */
+}
+
+/* File loading overlay */
+.file-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease-in;
+}
+
+.loading-spinner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--color-text-primary);
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid var(--color-border-medium);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-spinner p {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+}
+
+/* File error overlay */
+.file-error-overlay {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 1000;
+  animation: slideInRight 0.3s ease-out;
+}
+
+.error-message {
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 300px;
+  box-shadow: var(--shadow-lg);
+}
+
+.error-icon {
+  font-size: 2rem;
+}
+
+.error-message p {
+  margin: 0;
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  word-break: break-word;
+}
+
+.dismiss-btn {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-error);
+  color: var(--color-white);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.dismiss-btn:hover {
+  background: var(--color-error-dark);
+  transform: translateY(-1px);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Chat Panel */
+.chat-panel {
+  width: 400px;
+  min-width: 300px;
+  max-width: 600px;
+  background: var(--color-bg-primary);
   border-right: 1px solid var(--color-border-light);
 }
 
-.right-panel {
+/* Terminal Panel */
+.terminal-panel {
   width: 500px;
   min-width: 300px;
-  max-width: 50%;
+  max-width: 700px;
   background: var(--color-bg-primary);
 }
 
@@ -188,5 +469,34 @@ const showFileExplorer = ref(false);
   height: 100%;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1600px) {
+  .file-panel {
+    width: 200px;
+  }
+  
+  .chat-panel {
+    width: 350px;
+  }
+  
+  .terminal-panel {
+    width: 450px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .split-view {
+    flex-wrap: wrap;
+  }
+  
+  .file-panel,
+  .terminal-panel {
+    width: 100%;
+    max-width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border-light);
+  }
 }
 </style>
