@@ -92,10 +92,23 @@ class OmniBackend:
         
         # Core components
         self.memory = Memory(db_path=os.path.join(self.data_dir, "omni.db"))
-        self.embeddings = Embeddings(
-            model_name=os.getenv("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-        )
         
+        # Lazy-load embeddings (only when needed, using fast sklearn backend)
+        self._embeddings = None
+    
+    @property
+    def embeddings(self):
+        """Lazy-load embeddings on first use"""
+        if self._embeddings is None:
+            # Use sklearn backend for fast startup (no model download)
+            self._embeddings = Embeddings(
+                model_name=os.getenv("EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+                backend="sklearn"  # Fast startup, no model download
+            )
+        return self._embeddings
+    
+    def _init_tools_and_llm(self):
+        """Initialize tools and LLM (called after __init__)"""
         # Self-modification tools
         self.ast_analyzer = ASTAnalyzer()
         # Note: RepoScanner needs CodeIndexer, skip for now
@@ -127,7 +140,6 @@ class OmniBackend:
             )
         
         logger.info(f"Backend ready: {provider}, model={self.llm.model}")
-    
     def _tool_read_file(self, filepath: str) -> dict:
         """Read a file from the project"""
         try:
@@ -665,6 +677,8 @@ class JSONRPCServer:
     
     def __init__(self):
         self.backend = OmniBackend()
+        # Initialize tools and LLM after backend is created
+        self.backend._init_tools_and_llm()
         self.methods = {
             "chat": self.backend.chat,
             "list_models": self.backend.list_models,
