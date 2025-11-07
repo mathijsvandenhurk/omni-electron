@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promises as fs } from 'fs';
 import dotenv from 'dotenv';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,40 +23,7 @@ app.commandLine.appendSwitch('--disable-background-timer-throttling');
 app.commandLine.appendSwitch('--disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('--disable-renderer-backgrounding');
 
-// Override console methods to send logs to terminal
-const originalConsoleLog = console.log;
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
-
-function sendToTerminal(level, ...args) {
-  const message = args.map(arg => 
-    typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-  ).join(' ');
-  
-  if (mainWindow) {
-    mainWindow.webContents.send('terminal-log', {
-      source: 'ELECTRON',
-      message: `[${level.toUpperCase()}] ${message}`,
-      timestamp: new Date().toLocaleTimeString()
-    });
-  }
-}
-
-console.log = (...args) => {
-  originalConsoleLog(...args);
-  sendToTerminal('info', ...args);
-};
-
-console.error = (...args) => {
-  originalConsoleError(...args);
-  sendToTerminal('error', ...args);
-};
-
-console.warn = (...args) => {
-  originalConsoleWarn(...args);
-  sendToTerminal('warn', ...args);
-};
-
+// Console logging - keep it simple, no terminal forwarding (causes infinite loops)
 let mainWindow = null;
 let pythonProcess = null;
 let pythonReady = false;
@@ -98,6 +66,14 @@ function createWindow() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.focus();
     }
+  });
+
+  // Forward all browser console logs to terminal
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    const levelNames = ['VERBOSE', 'INFO', 'WARNING', 'ERROR'];
+    const levelName = levelNames[level] || 'LOG';
+    const source = sourceId ? sourceId.split('/').pop() : 'renderer';
+    console.log(`[Browser ${levelName}] ${source}:${line} - ${message}`);
   });
 
   // Load Vite dev server in development, or built files in production
@@ -398,9 +374,6 @@ ipcMain.handle('get-status', async () => {
 // List files in directory
 ipcMain.handle('list-files', async (event, dirPath) => {
   try {
-    const fs = require('fs').promises;
-    const path = require('path');
-    
     // Resolve relative paths relative to the app directory
     const fullPath = path.resolve(dirPath);
     
@@ -419,6 +392,146 @@ ipcMain.handle('list-files', async (event, dirPath) => {
     return { success: true, data: { files } };
   } catch (error) {
     console.error('[Electron] List files error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Recursive file tree scanning (VS Code style)
+ipcMain.handle('list-files-recursive', async (event, dirPath, options = {}) => {
+  const { 
+    maxDepth = 10, 
+    excludePatterns = [
+      'node_modules',
+      '__pycache__',
+      '.DS_Store',
+      'Thumbs.db'
+    ] 
+  } = options;
+  
+  try {
+    // Resolve relative paths relative to the app directory
+    const rootPath = path.resolve(dirPath);
+    
+    // Basic security check - don't allow going outside the project
+    const projectRoot = process.cwd();
+    if (!rootPath.startsWith(projectRoot)) {
+      return { success: false, error: 'Access denied: Path outside project directory' };
+    }
+    
+    const fileTree = [];
+    
+    async function scanDirectory(dirPath, currentDepth = 0, relativePath = '') {
+      if (currentDepth > maxDepth) return [];
+      
+      try {
+        const entries = await fs.readdir(dirPath, { withFileTypes: true });
+        const items = [];
+        
+        for (const entry of entries) {
+          const name = entry.name;
+          
+          // Skip only explicitly excluded patterns
+          if (excludePatterns.includes(name)) {
+            continue;
+          }
+          
+          const fullPath = path.join(dirPath, name);
+          const relPath = relativePath ? `${relativePath}/${name}` : name;
+          
+          if (entry.isDirectory()) {
+            // Add directory
+            items.push({
+              name,
+              path: relPath + '/',
+              type: 'directory'
+            });
+            
+            // Recursively scan subdirectory
+            const children = await scanDirectory(fullPath, currentDepth + 1, relPath);
+            items.push(...children);
+          } else {
+            // Add file
+            items.push({
+              name,
+              path: relPath,
+              type: 'file'
+            });
+          }
+        }
+        
+        return items;
+      } catch (err) {
+        console.error('[Electron] Error scanning directory:', dirPath, err);
+        return [];
+      }
+    }
+    
+    const allFiles = await scanDirectory(rootPath);
+    
+    return { 
+      success: true, 
+      data: { 
+        files: allFiles.map(item => item.path),
+        tree: allFiles 
+      } 
+    };
+  } catch (error) {
+    console.error('[Electron] List files recursive error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Read file content
+ipcMain.handle('read-file', async (event, filePath) => {
+  try {
+    // Resolve relative paths relative to the app directory
+    const fullPath = path.resolve(filePath);
+    
+    // Basic security check - don't allow going outside the project
+    const projectRoot = process.cwd();
+    if (!fullPath.startsWith(projectRoot)) {
+      return { success: false, error: 'Access denied: Path outside project directory' };
+    }
+    
+    // Check if file exists
+    try {
+      await fs.access(fullPath);
+    } catch {
+      return { success: false, error: 'File not found' };
+    }
+    
+    // Read file content
+    const buffer = await fs.readFile(fullPath);
+    
+    // Detect if file is binary by checking for null bytes
+    const isBinary = buffer.includes(0);
+    
+    if (isBinary) {
+      return { 
+        success: true, 
+        data: { 
+          content: null, 
+          isBinary: true,
+          path: fullPath,
+          size: buffer.length
+        } 
+      };
+    }
+    
+    // Convert to string for text files
+    const content = buffer.toString('utf-8');
+    
+    return { 
+      success: true, 
+      data: { 
+        content, 
+        isBinary: false,
+        path: fullPath,
+        size: buffer.length
+      } 
+    };
+  } catch (error) {
+    console.error('[Electron] Read file error:', error);
     return { success: false, error: error.message };
   }
 });

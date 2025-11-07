@@ -20,9 +20,24 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src')
     }
   },
+  optimizeDeps: {
+    include: ['monaco-editor']
+  },
+  worker: {
+    format: 'es'
+  },
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      ignored: [
+        '**/backend/venv/**',
+        '**/backend/__pycache__/**',
+        '**/backend/**/__pycache__/**',
+        '**/.venv/**',
+        '**/node_modules/**'
+      ]
+    }
   },
   build: {
     outDir: 'dist',
