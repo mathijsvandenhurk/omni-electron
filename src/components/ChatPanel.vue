@@ -12,7 +12,22 @@
       </button>
     </div>
     
-    <div class="messages" ref="messagesContainer">
+    <div class="messages" ref="messagesContainer" @scroll="handleScroll">
+      <!-- Load Older Messages Button -->
+      <div v-if="hasArchivedMessages" class="load-older-container">
+        <button 
+          v-if="!loadingOlder"
+          @click="loadOlderMessages" 
+          class="load-older-button"
+        >
+          📜 Oudere berichten laden? ({{ archivedMessages.length }} berichten gearchiveerd)
+        </button>
+        <div v-else class="loading-older">
+          <span class="spinner-small"></span>
+          Laden...
+        </div>
+      </div>
+      
       <div
         v-for="(msg, index) in messages"
         :key="index"
@@ -93,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted } from 'vue';
+import { ref, nextTick, watch, onMounted, computed } from 'vue';
 import InlineChat from './InlineChat.vue';
 
 interface Message {
@@ -127,6 +142,81 @@ const loadMessages = (): Message[] => {
 
 const messages = ref<Message[]>(loadMessages());
 
+// Message archiving (max 20 visible messages)
+const MAX_VISIBLE_MESSAGES = 20;
+const archivedMessages = ref<Message[]>([]);
+const loadingOlder = ref(false);
+
+const hasArchivedMessages = computed(() => archivedMessages.value.length > 0);
+
+// Archive old messages when exceeding limit
+const archiveOldMessages = () => {
+  if (messages.value.length > MAX_VISIBLE_MESSAGES) {
+    const toArchive = messages.value.length - MAX_VISIBLE_MESSAGES;
+    const archived = messages.value.splice(0, toArchive);
+    archivedMessages.value.push(...archived);
+    
+    // Save archived messages to localStorage
+    try {
+      localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+    } catch (error) {
+      console.warn('Failed to save archived messages:', error);
+    }
+  }
+};
+
+// Load archived messages from localStorage
+const loadArchivedMessages = () => {
+  try {
+    const saved = localStorage.getItem('omni-chat-archived');
+    if (saved) {
+      archivedMessages.value = JSON.parse(saved).map((msg: any) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp)
+      }));
+    }
+  } catch (error) {
+    console.warn('Failed to load archived messages:', error);
+  }
+};
+
+// Load older messages when button is clicked
+const loadOlderMessages = async () => {
+  if (archivedMessages.value.length === 0) return;
+  
+  loadingOlder.value = true;
+  
+  // Simulate small delay for better UX
+  await new Promise(resolve => setTimeout(resolve, 300));
+  
+  // Load 20 more messages from archive
+  const toLoad = Math.min(20, archivedMessages.value.length);
+  const loaded = archivedMessages.value.splice(-toLoad, toLoad);
+  messages.value.unshift(...loaded);
+  
+  // Update localStorage
+  try {
+    localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+    localStorage.setItem('omni-chat-messages', JSON.stringify(messages.value));
+  } catch (error) {
+    console.warn('Failed to update messages:', error);
+  }
+  
+  loadingOlder.value = false;
+};
+
+// Scroll tracking
+const userScrolledUp = ref(false);
+const isNearBottom = () => {
+  if (!messagesContainer.value) return true;
+  const { scrollTop, scrollHeight, clientHeight } = messagesContainer.value;
+  return scrollHeight - scrollTop - clientHeight < 100; // Within 100px of bottom
+};
+
+const handleScroll = () => {
+  userScrolledUp.value = !isNearBottom();
+};
+
 // Save messages to localStorage when they change
 watch(messages, (newMessages) => {
   try {
@@ -142,6 +232,15 @@ if ((import.meta as any).hot) {
   // HMR preservation logic
   });
 }
+
+// Load archived messages on mount
+onMounted(() => {
+  loadArchivedMessages();
+  // Scroll to bottom on initial load
+  nextTick(() => {
+    scrollToBottom();
+  });
+});
 
 const inputMessage = ref('');
 const loading = ref(false);
@@ -291,7 +390,11 @@ const sendMessage = async () => {
   inputMessage.value = '';
   loading.value = true;
 
-  // Scroll to bottom
+  // Archive old messages if needed (before adding new response)
+  archiveOldMessages();
+
+  // Scroll to bottom and reset scroll tracking
+  userScrolledUp.value = false;
   await nextTick();
   scrollToBottom();
 
@@ -375,8 +478,8 @@ const sendMessage = async () => {
   }
 };
 
-const scrollToBottom = () => {
-  if (messagesContainer.value) {
+const scrollToBottom = (force = false) => {
+  if (messagesContainer.value && (force || !userScrolledUp.value)) {
     messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
   }
 };
@@ -400,6 +503,10 @@ const clearChat = () => {
   };
   messages.value = [welcomeMessage];
   localStorage.removeItem('omni-chat-messages');
+  
+  // Clear archived messages
+  archivedMessages.value = [];
+  localStorage.removeItem('omni-chat-archived');
   
   // Also clear command history
   commandHistory.value = [];
@@ -616,6 +723,54 @@ const formatTime = (date: Date) => {
   flex-direction: column;
   gap: var(--space-4);
   max-width: 100%;
+  scroll-behavior: smooth;
+}
+
+.load-older-container {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) 0;
+  margin-bottom: var(--space-2);
+}
+
+.load-older-button {
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.load-older-button:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.loading-older {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.spinner-small {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border-medium);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
 }
 
 .message {
