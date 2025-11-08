@@ -198,14 +198,16 @@ const filePanel = useResizable({
   minSize: 200,
   maxSize: 400,
   defaultSize: 250,
-  direction: 'horizontal'
+  direction: 'horizontal',
+  invertDelta: true // Right panel: grows leftward
 });
 
 const terminalPanel = useResizable({
   minSize: 150,
   maxSize: 500,
   defaultSize: 300,
-  direction: 'vertical'
+  direction: 'vertical',
+  invertDelta: true // Bottom panel: grows upward
 });
 
 // File selection handler - opens file in editor

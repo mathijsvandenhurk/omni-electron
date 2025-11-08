@@ -5,6 +5,7 @@ export interface ResizeOptions {
   maxSize: number;
   defaultSize: number;
   direction: 'horizontal' | 'vertical';
+  invertDelta?: boolean; // For panels on the right or bottom that grow in opposite direction
   onResize?: (size: number) => void;
 }
 
@@ -34,7 +35,12 @@ export function useResizable(
     if (!isResizing.value) return;
     
     const currentPosition = options.direction === 'horizontal' ? event.clientX : event.clientY;
-    const delta = currentPosition - startPosition;
+    let delta = currentPosition - startPosition;
+    
+    // Invert delta for panels that grow in opposite direction (right/bottom panels)
+    if (options.invertDelta) {
+      delta = -delta;
+    }
     
     let newSize = startSize + delta;
     
