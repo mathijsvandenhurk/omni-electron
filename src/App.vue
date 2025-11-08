@@ -44,49 +44,7 @@
 
     <main class="app-main">
       <div class="split-view">
-        <!-- File Explorer Panel -->
-        <div v-if="showFileExplorer" class="file-panel">
-          <Suspense>
-            <FileExplorer @file-selected="handleFileSelected" />
-            <template #fallback>
-              <div class="loading-placeholder">Loading files...</div>
-            </template>
-          </Suspense>
-        </div>
-        
-        <!-- Code Editor Panel (NEW!) -->
-        <div v-if="showEditor" class="editor-panel">
-          <Suspense>
-            <EditorPanel 
-              ref="editorRef"
-              :theme="currentTheme"
-              @content-change="handleEditorChange"
-              @selection-change="handleSelectionChange"
-            />
-            <template #fallback>
-              <div class="loading-placeholder">Loading editor...</div>
-            </template>
-          </Suspense>
-          
-          <!-- Loading overlay when opening file -->
-          <div v-if="loadingFile" class="file-loading-overlay">
-            <div class="loading-spinner">
-              <div class="spinner"></div>
-              <p>Opening file...</p>
-            </div>
-          </div>
-          
-          <!-- Error message when file loading fails -->
-          <div v-if="fileError" class="file-error-overlay" @click="fileError = null">
-            <div class="error-message">
-              <span class="error-icon">⚠️</span>
-              <p>{{ fileError }}</p>
-              <button @click="fileError = null" class="dismiss-btn">Dismiss</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Chat Panel -->
+        <!-- Chat Panel (LEFT) -->
         <div v-if="showChat" class="chat-panel">
           <Suspense>
             <ChatPanel />
@@ -96,12 +54,57 @@
           </Suspense>
         </div>
         
-        <!-- Terminal Panel -->
-        <div v-if="showTerminal" class="terminal-panel">
+        <!-- Center Column: Editor + Terminal (MIDDLE) -->
+        <div v-if="showEditor || showTerminal" class="center-column">
+          <!-- Code Editor Panel -->
+          <div v-if="showEditor" class="editor-panel">
+            <Suspense>
+              <EditorPanel 
+                ref="editorRef"
+                :theme="currentTheme"
+                @content-change="handleEditorChange"
+                @selection-change="handleSelectionChange"
+              />
+              <template #fallback>
+                <div class="loading-placeholder">Loading editor...</div>
+              </template>
+            </Suspense>
+            
+            <!-- Loading overlay when opening file -->
+            <div v-if="loadingFile" class="file-loading-overlay">
+              <div class="loading-spinner">
+                <div class="spinner"></div>
+                <p>Opening file...</p>
+              </div>
+            </div>
+            
+            <!-- Error message when file loading fails -->
+            <div v-if="fileError" class="file-error-overlay" @click="fileError = null">
+              <div class="error-message">
+                <span class="error-icon">⚠️</span>
+                <p>{{ fileError }}</p>
+                <button @click="fileError = null" class="dismiss-btn">Dismiss</button>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Terminal Panel (BELOW EDITOR) -->
+          <div v-if="showTerminal" class="terminal-panel">
+            <Suspense>
+              <Terminal />
+              <template #fallback>
+                <div class="loading-placeholder">Loading terminal...</div>
+              </template>
+            </Suspense>
+          </div>
+        </div>
+        
+        <!-- File Explorer Panel (RIGHT) -->
+        <div v-if="showFileExplorer" class="file-panel">
           <Suspense>
-            <Terminal />
+            <FileExplorer @file-selected="handleFileSelected" />
             <template #fallback>
-              <div class="loading-placeholder">Loading terminal...</div>
+              <div class="loading-placeholder">Loading files...</div>
             </template>
           </Suspense>
         </div>
@@ -314,29 +317,55 @@ const handleSelectionChange = (selection: string) => {
   gap: 0;
 }
 
-/* File Explorer Panel */
-.file-panel {
-  width: 250px;
-  min-width: 200px;
-  max-width: 400px;
-  background: var(--color-bg-secondary);
-  border-right: 1px solid var(--color-border-light);
-  overflow-y: auto;
-}
-
-/* Code Editor Panel (NEW!) */
-.editor-panel {
-  flex: 1;
-  min-width: 400px;
+/* Chat Panel (LEFT SIDE) */
+.chat-panel {
+  width: 400px;
+  min-width: 300px;
+  max-width: 600px;
   background: var(--color-bg-primary);
   border-right: 1px solid var(--color-border-light);
+  overflow: hidden;
+}
+
+/* Center Column: Editor + Terminal (MIDDLE) */
+.center-column {
+  flex: 1;
+  min-width: 400px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Code Editor Panel (TOP OF CENTER COLUMN) */
+.editor-panel {
+  flex: 1;
+  min-height: 300px;
+  background: var(--color-bg-primary);
+  border-bottom: 1px solid var(--color-border-light);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   position: relative; /* For overlay positioning */
 }
 
-/* File loading overlay */
+/* Terminal Panel (BOTTOM OF CENTER COLUMN) */
+.terminal-panel {
+  height: 300px;
+  min-height: 150px;
+  max-height: 500px;
+  background: var(--color-bg-primary);
+  border-right: 1px solid var(--color-border-light);
+  overflow: hidden;
+}
+
+/* File Explorer Panel (RIGHT SIDE) */
+.file-panel {
+  width: 250px;
+  min-width: 200px;
+  max-width: 400px;
+  background: var(--color-bg-secondary);
+  overflow-y: auto;
+}
 .file-loading-overlay {
   position: absolute;
   top: 0;
@@ -445,24 +474,8 @@ const handleSelectionChange = (selection: string) => {
   }
 }
 
-/* Chat Panel */
-.chat-panel {
-  width: 400px;
-  min-width: 300px;
-  max-width: 600px;
-  background: var(--color-bg-primary);
-  border-right: 1px solid var(--color-border-light);
-}
-
-/* Terminal Panel */
-.terminal-panel {
-  width: 500px;
-  min-width: 300px;
-  max-width: 700px;
-  background: var(--color-bg-primary);
-}
-
-.loading-placeholder {
+/* File loading overlay */
+.file-loading-overlay {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -473,30 +486,40 @@ const handleSelectionChange = (selection: string) => {
 
 /* Responsive adjustments */
 @media (max-width: 1600px) {
-  .file-panel {
-    width: 200px;
-  }
-  
   .chat-panel {
     width: 350px;
   }
   
+  .file-panel {
+    width: 200px;
+  }
+  
   .terminal-panel {
-    width: 450px;
+    height: 250px;
   }
 }
 
 @media (max-width: 1200px) {
   .split-view {
-    flex-wrap: wrap;
+    flex-direction: column;
   }
   
-  .file-panel,
-  .terminal-panel {
+  .chat-panel,
+  .file-panel {
     width: 100%;
     max-width: 100%;
+    height: 300px;
     border-right: none;
     border-bottom: 1px solid var(--color-border-light);
+  }
+  
+  .center-column {
+    min-width: 100%;
+  }
+  
+  .terminal-panel {
+    height: 200px;
+    border-right: none;
   }
 }
 </style>
