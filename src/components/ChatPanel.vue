@@ -121,18 +121,36 @@ interface Message {
 const loadMessages = (): Message[] => {
   try {
     const saved = localStorage.getItem('omni-chat-messages');
+    console.log('[ChatPanel] Loading messages from localStorage:', saved ? 'found' : 'not found');
+    
     if (saved) {
       const parsed = JSON.parse(saved);
-      return parsed.map((msg: any) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp)
-      }));
+      console.log('[ChatPanel] Parsed messages:', parsed.length, 'messages');
+      // Only return saved messages if array is not empty
+      if (parsed && parsed.length > 0) {
+        return parsed.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+      }
+    }
+    
+    // Check if there are archived messages - if so, don't show welcome message
+    const archivedSaved = localStorage.getItem('omni-chat-archived');
+    if (archivedSaved) {
+      const archivedParsed = JSON.parse(archivedSaved);
+      console.log('[ChatPanel] Found archived messages:', archivedParsed.length, 'messages');
+      if (archivedParsed && archivedParsed.length > 0) {
+        // Return empty array, archived messages will be shown via loadOlderMessages
+        return [];
+      }
     }
   } catch (error) {
     console.warn('Failed to load chat messages from localStorage:', error);
   }
   
-  // Default welcome message
+  // Default welcome message (only if no messages AND no archived messages)
+  console.log('[ChatPanel] Using default welcome message');
   return [{
     role: 'assistant',
     content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
@@ -142,12 +160,13 @@ const loadMessages = (): Message[] => {
 
 const messages = ref<Message[]>(loadMessages());
 
-// Message archiving (max 20 visible messages)
-const MAX_VISIBLE_MESSAGES = 20;
+// Message archiving (max 10 visible messages)
+const MAX_VISIBLE_MESSAGES = 10;
 const archivedMessages = ref<Message[]>([]);
 const loadingOlder = ref(false);
+const showLoadOlder = ref(false);
 
-const hasArchivedMessages = computed(() => archivedMessages.value.length > 0);
+const hasArchivedMessages = computed(() => archivedMessages.value.length > 0 && showLoadOlder.value);
 
 // Archive old messages when exceeding limit
 const archiveOldMessages = () => {
@@ -186,13 +205,19 @@ const loadOlderMessages = async () => {
   
   loadingOlder.value = true;
   
+  // Save current scroll height before adding messages
+  const oldScrollHeight = messagesContainer.value?.scrollHeight || 0;
+  
   // Simulate small delay for better UX
   await new Promise(resolve => setTimeout(resolve, 300));
   
-  // Load 20 more messages from archive
-  const toLoad = Math.min(20, archivedMessages.value.length);
+  // Load 10 more messages from archive
+  const toLoad = Math.min(10, archivedMessages.value.length);
   const loaded = archivedMessages.value.splice(-toLoad, toLoad);
   messages.value.unshift(...loaded);
+  
+  // Hide the load button after loading
+  showLoadOlder.value = false;
   
   // Update localStorage
   try {
@@ -203,6 +228,16 @@ const loadOlderMessages = async () => {
   }
   
   loadingOlder.value = false;
+  
+  // Restore scroll position after DOM updates
+  // The new messages increase the scroll height, so we need to adjust
+  await nextTick();
+  if (messagesContainer.value) {
+    const newScrollHeight = messagesContainer.value.scrollHeight;
+    const heightDifference = newScrollHeight - oldScrollHeight;
+    // Maintain relative scroll position by adding the height difference
+    messagesContainer.value.scrollTop += heightDifference;
+  }
 };
 
 // Scroll tracking
@@ -215,11 +250,27 @@ const isNearBottom = () => {
 
 const handleScroll = () => {
   userScrolledUp.value = !isNearBottom();
+  
+  // Show "Load older" button when user scrolls up and there are archived messages
+  if (userScrolledUp.value && archivedMessages.value.length > 0) {
+    showLoadOlder.value = true;
+  }
 };
 
 // Save messages to localStorage when they change
 watch(messages, (newMessages) => {
   try {
+    // Don't save if we only have the default welcome message and no archived messages
+    // This prevents overwriting existing chat history on component reload
+    if (newMessages.length === 1 && 
+        newMessages[0].role === 'assistant' && 
+        newMessages[0].content.includes('Hallo! Ik ben Omni') &&
+        archivedMessages.value.length === 0) {
+      console.log('[ChatPanel] Skipping save - only default welcome message');
+      return;
+    }
+    
+    console.log('[ChatPanel] Saving messages to localStorage:', newMessages.length, 'messages');
     localStorage.setItem('omni-chat-messages', JSON.stringify(newMessages));
   } catch (error) {
     console.warn('Failed to save chat messages to localStorage:', error);
@@ -235,11 +286,38 @@ if ((import.meta as any).hot) {
 
 // Load archived messages on mount
 onMounted(() => {
+  console.log('[ChatPanel] Mounted, loading archived messages and scrolling...');
   loadArchivedMessages();
-  // Scroll to bottom on initial load
-  nextTick(() => {
-    scrollToBottom();
-  });
+  
+  // If we have archived messages but no visible messages, load the most recent 10
+  if (archivedMessages.value.length > 0 && messages.value.length === 0) {
+    console.log('[ChatPanel] No visible messages but have archived, loading most recent...');
+    const toLoad = Math.min(10, archivedMessages.value.length);
+    const loaded = archivedMessages.value.splice(-toLoad, toLoad);
+    messages.value.push(...loaded);
+    
+    // Update localStorage
+    try {
+      localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+      localStorage.setItem('omni-chat-messages', JSON.stringify(messages.value));
+    } catch (error) {
+      console.warn('Failed to restore messages from archive:', error);
+    }
+  }
+  
+  // Archive old messages if we loaded more than MAX_VISIBLE_MESSAGES
+  if (messages.value.length > MAX_VISIBLE_MESSAGES) {
+    console.log('[ChatPanel] Too many messages loaded, archiving old ones...');
+    archiveOldMessages();
+  }
+  
+  // Scroll to bottom on initial load (instant, no animation)
+  // Use setTimeout to ensure DOM is fully rendered
+  setTimeout(() => {
+    if (messagesContainer.value) {
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    }
+  }, 0);
 });
 
 const inputMessage = ref('');
@@ -478,9 +556,18 @@ const sendMessage = async () => {
   }
 };
 
-const scrollToBottom = (force = false) => {
+const scrollToBottom = (force = false, instant = false) => {
   if (messagesContainer.value && (force || !userScrolledUp.value)) {
-    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    if (instant) {
+      // Instant scroll without animation (for initial load)
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    } else {
+      // Smooth scroll
+      messagesContainer.value.scrollTo({
+        top: messagesContainer.value.scrollHeight,
+        behavior: 'smooth'
+      });
+    }
   }
 };
 
@@ -723,7 +810,7 @@ const formatTime = (date: Date) => {
   flex-direction: column;
   gap: var(--space-4);
   max-width: 100%;
-  scroll-behavior: smooth;
+  /* scroll-behavior removed - controlled via JS for instant vs smooth */
 }
 
 .load-older-container {
