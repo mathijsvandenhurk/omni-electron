@@ -45,7 +45,11 @@
     <main class="app-main">
       <div class="split-view">
         <!-- Chat Panel (LEFT) -->
-        <div v-if="showChat" class="chat-panel">
+        <div 
+          v-if="showChat" 
+          class="chat-panel"
+          :style="{ width: chatPanel.size.value + 'px' }"
+        >
           <Suspense>
             <ChatPanel />
             <template #fallback>
@@ -54,10 +58,22 @@
           </Suspense>
         </div>
         
+        <!-- Resize Handle for Chat -->
+        <div 
+          v-if="showChat"
+          class="resize-handle resize-handle-vertical"
+          @mousedown="chatPanel.startResize"
+          :class="{ resizing: chatPanel.isResizing.value }"
+        ></div>
+        
         <!-- Center Column: Editor + Terminal (MIDDLE) -->
         <div v-if="showEditor || showTerminal" class="center-column">
           <!-- Code Editor Panel -->
-          <div v-if="showEditor" class="editor-panel">
+          <div 
+            v-if="showEditor" 
+            class="editor-panel"
+            :style="showTerminal ? { height: `calc(100% - ${terminalPanel.size.value}px)` } : {}"
+          >
             <Suspense>
               <EditorPanel 
                 ref="editorRef"
@@ -88,8 +104,20 @@
             </div>
           </div>
           
+          <!-- Resize Handle for Terminal -->
+          <div 
+            v-if="showEditor && showTerminal"
+            class="resize-handle resize-handle-horizontal"
+            @mousedown="terminalPanel.startResize"
+            :class="{ resizing: terminalPanel.isResizing.value }"
+          ></div>
+          
           <!-- Terminal Panel (BELOW EDITOR) -->
-          <div v-if="showTerminal" class="terminal-panel">
+          <div 
+            v-if="showTerminal" 
+            class="terminal-panel"
+            :style="{ height: terminalPanel.size.value + 'px' }"
+          >
             <Suspense>
               <Terminal />
               <template #fallback>
@@ -99,8 +127,20 @@
           </div>
         </div>
         
+        <!-- Resize Handle for Files -->
+        <div 
+          v-if="showFileExplorer"
+          class="resize-handle resize-handle-vertical"
+          @mousedown="filePanel.startResize"
+          :class="{ resizing: filePanel.isResizing.value }"
+        ></div>
+        
         <!-- File Explorer Panel (RIGHT) -->
-        <div v-if="showFileExplorer" class="file-panel">
+        <div 
+          v-if="showFileExplorer" 
+          class="file-panel"
+          :style="{ width: filePanel.size.value + 'px' }"
+        >
           <Suspense>
             <FileExplorer @file-selected="handleFileSelected" />
             <template #fallback>
@@ -116,6 +156,7 @@
 <script setup lang="ts">
 import { ref, defineAsyncComponent, computed } from 'vue';
 import { useSystem } from './composables/useSystem';
+import { useResizable } from './composables/useResizable';
 import ThemeToggle from './components/ThemeToggle.vue';
 
 // Lazy load components for better startup performance
@@ -144,6 +185,28 @@ const currentTheme = computed(() => {
 // File loading state
 const loadingFile = ref(false);
 const fileError = ref<string | null>(null);
+
+// Resizable panels
+const chatPanel = useResizable({
+  minSize: 300,
+  maxSize: 600,
+  defaultSize: 400,
+  direction: 'horizontal'
+});
+
+const filePanel = useResizable({
+  minSize: 200,
+  maxSize: 400,
+  defaultSize: 250,
+  direction: 'horizontal'
+});
+
+const terminalPanel = useResizable({
+  minSize: 150,
+  maxSize: 500,
+  defaultSize: 300,
+  direction: 'vertical'
+});
 
 // File selection handler - opens file in editor
 const handleFileSelected = async (filePath: string) => {
@@ -319,12 +382,10 @@ const handleSelectionChange = (selection: string) => {
 
 /* Chat Panel (LEFT SIDE) */
 .chat-panel {
-  width: 400px;
-  min-width: 300px;
-  max-width: 600px;
   background: var(--color-bg-primary);
   border-right: 1px solid var(--color-border-light);
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 /* Center Column: Editor + Terminal (MIDDLE) */
@@ -338,33 +399,84 @@ const handleSelectionChange = (selection: string) => {
 
 /* Code Editor Panel (TOP OF CENTER COLUMN) */
 .editor-panel {
-  flex: 1;
-  min-height: 300px;
   background: var(--color-bg-primary);
   border-bottom: 1px solid var(--color-border-light);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   position: relative; /* For overlay positioning */
+  flex-shrink: 0;
 }
 
 /* Terminal Panel (BOTTOM OF CENTER COLUMN) */
 .terminal-panel {
-  height: 300px;
-  min-height: 150px;
-  max-height: 500px;
   background: var(--color-bg-primary);
   border-right: 1px solid var(--color-border-light);
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 /* File Explorer Panel (RIGHT SIDE) */
 .file-panel {
-  width: 250px;
-  min-width: 200px;
-  max-width: 400px;
   background: var(--color-bg-secondary);
   overflow-y: auto;
+  flex-shrink: 0;
+}
+
+/* Resize Handles */
+.resize-handle {
+  flex-shrink: 0;
+  background: var(--color-border-light);
+  transition: background-color var(--transition-fast);
+  z-index: 10;
+  position: relative;
+}
+
+.resize-handle-vertical {
+  width: 4px;
+  cursor: col-resize;
+  min-width: 4px;
+  max-width: 4px;
+}
+
+.resize-handle-horizontal {
+  height: 4px;
+  cursor: row-resize;
+  min-height: 4px;
+  max-height: 4px;
+}
+
+.resize-handle:hover,
+.resize-handle.resizing {
+  background: var(--color-primary);
+}
+
+.resize-handle-vertical:hover::after,
+.resize-handle-vertical.resizing::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 40px;
+  background: var(--color-primary-dark);
+  border-radius: var(--radius-full);
+  pointer-events: none;
+}
+
+.resize-handle-horizontal:hover::after,
+.resize-handle-horizontal.resizing::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 40px;
+  height: 3px;
+  background: var(--color-primary-dark);
+  border-radius: var(--radius-full);
+  pointer-events: none;
 }
 .file-loading-overlay {
   position: absolute;
@@ -485,20 +597,6 @@ const handleSelectionChange = (selection: string) => {
 }
 
 /* Responsive adjustments */
-@media (max-width: 1600px) {
-  .chat-panel {
-    width: 350px;
-  }
-  
-  .file-panel {
-    width: 200px;
-  }
-  
-  .terminal-panel {
-    height: 250px;
-  }
-}
-
 @media (max-width: 1200px) {
   .split-view {
     flex-direction: column;
@@ -506,7 +604,7 @@ const handleSelectionChange = (selection: string) => {
   
   .chat-panel,
   .file-panel {
-    width: 100%;
+    width: 100% !important;
     max-width: 100%;
     height: 300px;
     border-right: none;
@@ -518,8 +616,12 @@ const handleSelectionChange = (selection: string) => {
   }
   
   .terminal-panel {
-    height: 200px;
+    height: 200px !important;
     border-right: none;
+  }
+  
+  .resize-handle {
+    display: none;
   }
 }
 </style>

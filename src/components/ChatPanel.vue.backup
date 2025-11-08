@@ -82,11 +82,19 @@
         ⏹️ Stop
       </button>
     </div>
+
+    <!-- Inline Chat Component -->
+    <InlineChat 
+      ref="inlineChatRef"
+      @submit="handleInlineChatSubmit"
+      @apply="handleInlineChatApply"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, nextTick, watch, onMounted } from 'vue';
+import InlineChat from './InlineChat.vue';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -327,11 +335,11 @@ const sendMessage = async () => {
       const lastMsg = messages.value[assistantMessageIndex];
       const existingProgress = lastMsg.content;
       
-      // Add separator between progress and final response
-      const separator = existingProgress ? '\n\n---\n\n**Finale Response:**\n\n' : '';
+      // Add separator between progress and final response if there's progress
+      const separator = existingProgress ? '\n\n---\n\n**Final Response:**\n\n' : '';
       
-      // Smooth typewriter effect using requestAnimationFrame (~60fps)
-      await typewriterEffect(fullText, (partialText) => {
+      // Use typewriter effect for the final response
+      await typewriterEffect(fullText, (partialText: string) => {
         messages.value[assistantMessageIndex].content = existingProgress + separator + partialText;
         scrollToBottom();
       });
@@ -397,6 +405,88 @@ const clearChat = () => {
   commandHistory.value = [];
   historyIndex.value = -1;
   localStorage.removeItem('omni-command-history');
+};
+
+// InlineChat handlers
+const inlineChatRef = ref();
+
+const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
+  console.log('Inline chat submit:', { prompt, selection });
+  
+  // Add user message to chat
+  const userMessage: Message = {
+    role: 'user',
+    content: selection ? `\`\`\`\n${selection}\n\`\`\`\n\n${prompt}` : prompt,
+    timestamp: new Date()
+  };
+  messages.value.push(userMessage);
+
+  // Trigger API call similar to sendMessage
+  loading.value = true;
+  
+  // Add placeholder for assistant message
+  const assistantMessageIndex = messages.value.length;
+  messages.value.push({
+    role: 'assistant',
+    content: '',
+    timestamp: new Date()
+  });
+
+  await nextTick();
+  scrollToBottom();
+
+  try {
+    const startTime = Date.now();
+    const response: any = await Promise.race([
+      window.electronAPI.chat(selection ? `${selection}\n\n${prompt}` : prompt),
+      new Promise((_, reject) => {
+        const checkTimeout = () => {
+          const elapsed = Date.now() - startTime;
+          const sinceProgress = Date.now() - lastProgressTime.value;
+          
+          if (elapsed > 180000 && sinceProgress > 45000) {
+            reject(new Error(`Request timeout after ${Math.round(elapsed/1000)}s`));
+          } else {
+            setTimeout(checkTimeout, 10000);
+          }
+        };
+        setTimeout(checkTimeout, 10000);
+      })
+    ]);
+
+    if (response.success) {
+      // Use typewriter effect
+      await typewriterEffect(
+        response.message,
+        (partialText) => {
+          messages.value[assistantMessageIndex].content = partialText;
+        }
+      );
+      
+      await nextTick();
+      scrollToBottom();
+    } else {
+      messages.value[assistantMessageIndex].content = `❌ Fout: ${response.error}`;
+    }
+  } catch (error) {
+    console.error('Inline chat error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    messages.value[assistantMessageIndex].content = `❌ Fout: ${errorMessage}`;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleInlineChatApply = (changes: string) => {
+  console.log('Inline chat apply:', changes);
+  // Here you would integrate with editor/code application logic
+  // For now, just add as a message
+  const message: Message = {
+    role: 'assistant',
+    content: `✅ Changes applied:\n\`\`\`\n${changes}\n\`\`\``,
+    timestamp: new Date()
+  };
+  messages.value.push(message);
 };
 
 const handleShiftEnter = () => {

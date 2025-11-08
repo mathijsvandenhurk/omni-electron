@@ -560,7 +560,7 @@ const formatTime = (date: Date) => {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-3) var(--space-4);
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
   border-bottom: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-sm);
 }
