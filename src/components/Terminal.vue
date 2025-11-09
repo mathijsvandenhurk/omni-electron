@@ -67,33 +67,7 @@ onMounted(() => {
   let lastUpdateTime = Date.now();
   observer.observe(document.body, { childList: true, subtree: true });
   
-  // Intercept console methods to capture frontend logs
-  const originalConsole = {
-    log: console.log,
-    error: console.error,
-    warn: console.warn,
-    info: console.info
-  };
-
-  console.log = (...args) => {
-    addLogLine(`[Frontend] ${args.join(' ')}`, 'info');
-    originalConsole.log(...args);
-  };
-
-  console.error = (...args) => {
-    addLogLine(`[Frontend] ERROR: ${args.join(' ')}`, 'error');
-    originalConsole.error(...args);
-  };
-
-  console.warn = (...args) => {
-    addLogLine(`[Frontend] WARN: ${args.join(' ')}`, 'info');
-    originalConsole.warn(...args);
-  };
-
-  console.info = (...args) => {
-    addLogLine(`[Frontend] INFO: ${args.join(' ')}`, 'info');
-    originalConsole.info(...args);
-  };
+  // Console methods are NOT intercepted anymore - only Terminal component shows its own logs
   
   addLogLine('=== Omni Console Logs ===', 'info');
   addLogLine('🚀 Terminal initialized - monitoring all system logs', 'info');

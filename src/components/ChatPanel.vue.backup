@@ -12,7 +12,22 @@
       </button>
     </div>
     
-    <div class="messages" ref="messagesContainer">
+    <div class="messages" ref="messagesContainer" @scroll="handleScroll">
+      <!-- Load Older Messages Button -->
+      <div v-if="hasArchivedMessages" class="load-older-container">
+        <button 
+          v-if="!loadingOlder"
+          @click="loadOlderMessages" 
+          class="load-older-button"
+        >
+          📜 Oudere berichten laden? ({{ archivedMessages.length }} berichten gearchiveerd)
+        </button>
+        <div v-else class="loading-older">
+          <span class="spinner-small"></span>
+          Laden...
+        </div>
+      </div>
+      
       <div
         v-for="(msg, index) in messages"
         :key="index"
@@ -36,8 +51,27 @@
               <div class="message-header">
                 <strong>Omni</strong>
                 <span class="timestamp">{{ formatTime(msg.timestamp) }}</span>
+                <span v-if="msg.isStreaming" class="streaming-badge">Streaming...</span>
               </div>
-              <div class="message-content">{{ msg.content }}</div>
+              
+              <!-- New: Use StreamingResponse for messages with requestId -->
+              <StreamingResponse
+                v-if="msg.requestId"
+                :ref="el => registerStreamingRef(el, msg.requestId!)"
+                :request-id="msg.requestId"
+                :auto-scroll="true"
+                @complete="handleStreamComplete"
+                @error="handleStreamError"
+              />
+              
+              <!-- Fallback: Old-style content display for backwards compatibility -->
+              <div v-else class="message-content">
+                <!-- Parse content for file references -->
+                <template v-for="(part, i) in parseMessageContent(msg.content)" :key="i">
+                  <FileReference v-if="part.type === 'file'" :path="part.value" />
+                  <span v-else>{{ part.value }}</span>
+                </template>
+              </div>
             </div>
           </div>
         </template>
@@ -49,9 +83,21 @@
           <div style="flex: 1;">
             <div class="message-header">
               <strong>Omni</strong>
+              <span class="activity-indicator">
+                <span class="spinner-dot"></span>
+                <span class="activity-text">Bezig...</span>
+              </span>
             </div>
             <div class="message-content">
-              <span class="typing-indicator">
+              <!-- Progress messages with spinner -->
+              <div v-if="currentProgress.length > 0" class="progress-section">
+                <div v-for="(prog, idx) in currentProgress" :key="idx" class="progress-item">
+                  <span class="progress-icon">{{ prog.icon }}</span>
+                  <span class="progress-text">{{ prog.text }}</span>
+                </div>
+              </div>
+              <!-- Typing indicator only when no progress -->
+              <span v-else class="typing-indicator">
                 <span></span>
                 <span></span>
                 <span></span>
@@ -93,31 +139,62 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted } from 'vue';
+import { ref, nextTick, watch, onMounted, computed } from 'vue';
 import InlineChat from './InlineChat.vue';
+import FileReference from './FileReference.vue';
+import StreamingResponse from './StreamingResponse.vue';
+import type { OmniEvent } from '../types/events';
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  requestId?: string;  // For tracking streaming responses
+  isStreaming?: boolean;  // Whether this message is still streaming
 }
 
-// Load messages from localStorage on component creation
-const loadMessages = (): Message[] => {
+// Load messages from persistent storage on component creation
+const loadMessages = async (): Promise<Message[]> => {
   try {
+    // First try loading from Electron persistent storage
+    if (window.electronAPI && window.electronAPI.loadChatMessages) {
+      const response = await window.electronAPI.loadChatMessages();
+      if (response.success && response.data && response.data.length > 0) {
+        return response.data.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+      }
+    }
+    
+    // Fallback: try localStorage (for backwards compatibility)
     const saved = localStorage.getItem('omni-chat-messages');
+    
     if (saved) {
       const parsed = JSON.parse(saved);
-      return parsed.map((msg: any) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp)
-      }));
+      // Only return saved messages if array is not empty
+      if (parsed && parsed.length > 0) {
+        return parsed.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+      }
+    }
+    
+    // Check if there are archived messages - if so, don't show welcome message
+    const archivedSaved = localStorage.getItem('omni-chat-archived');
+    if (archivedSaved) {
+      const archivedParsed = JSON.parse(archivedSaved);
+      if (archivedParsed && archivedParsed.length > 0) {
+        // Return empty array, archived messages will be shown via loadOlderMessages
+        return [];
+      }
     }
   } catch (error) {
-    console.warn('Failed to load chat messages from localStorage:', error);
+    console.warn('Failed to load chat messages:', error);
   }
   
-  // Default welcome message
+  // Default welcome message (only if no messages AND no archived messages)
   return [{
     role: 'assistant',
     content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
@@ -125,11 +202,131 @@ const loadMessages = (): Message[] => {
   }];
 };
 
-const messages = ref<Message[]>(loadMessages());
+const messages = ref<Message[]>([]);
+
+// Streaming support
+const streamingResponseRefs = ref<Record<string, any>>({});
+const currentRequestId = ref<string | null>(null);
+
+// Function to register StreamingResponse refs
+const registerStreamingRef = (el: any, requestId: string) => {
+  if (el && requestId) {
+    console.log('[ChatPanel] 📝 Registering StreamingResponse ref for:', requestId);
+    streamingResponseRefs.value[requestId] = el;
+  }
+};
+
+// Message archiving (max 10 visible messages)
+const MAX_VISIBLE_MESSAGES = 10;
+const archivedMessages = ref<Message[]>([]);
+const loadingOlder = ref(false);
+const showLoadOlder = ref(false);
+
+const hasArchivedMessages = computed(() => archivedMessages.value.length > 0 && showLoadOlder.value);
+
+// Archive old messages when exceeding limit
+const archiveOldMessages = () => {
+  if (messages.value.length > MAX_VISIBLE_MESSAGES) {
+    const toArchive = messages.value.length - MAX_VISIBLE_MESSAGES;
+    const archived = messages.value.splice(0, toArchive);
+    archivedMessages.value.push(...archived);
+    
+    // Save archived messages to localStorage
+    try {
+      localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+    } catch (error) {
+      console.warn('Failed to save archived messages:', error);
+    }
+  }
+};
+
+// Load archived messages from localStorage
+const loadArchivedMessages = () => {
+  try {
+    const saved = localStorage.getItem('omni-chat-archived');
+    if (saved) {
+      archivedMessages.value = JSON.parse(saved).map((msg: any) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp)
+      }));
+    }
+  } catch (error) {
+    console.warn('Failed to load archived messages:', error);
+  }
+};
+
+// Load older messages when button is clicked
+const loadOlderMessages = async () => {
+  if (archivedMessages.value.length === 0) return;
+  
+  loadingOlder.value = true;
+  
+  // Save current scroll height before adding messages
+  const oldScrollHeight = messagesContainer.value?.scrollHeight || 0;
+  
+  // Simulate small delay for better UX
+  await new Promise(resolve => setTimeout(resolve, 300));
+  
+  // Load 10 more messages from archive
+  const toLoad = Math.min(10, archivedMessages.value.length);
+  const loaded = archivedMessages.value.splice(-toLoad, toLoad);
+  messages.value.unshift(...loaded);
+  
+  // Hide the load button after loading
+  showLoadOlder.value = false;
+  
+  // Update localStorage
+  try {
+    localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+    localStorage.setItem('omni-chat-messages', JSON.stringify(messages.value));
+  } catch (error) {
+    console.warn('Failed to update messages:', error);
+  }
+  
+  loadingOlder.value = false;
+  
+  // Restore scroll position after DOM updates
+  // The new messages increase the scroll height, so we need to adjust
+  await nextTick();
+  if (messagesContainer.value) {
+    const newScrollHeight = messagesContainer.value.scrollHeight;
+    const heightDifference = newScrollHeight - oldScrollHeight;
+    // Maintain relative scroll position by adding the height difference
+    messagesContainer.value.scrollTop += heightDifference;
+  }
+};
+
+// Scroll tracking
+const userScrolledUp = ref(false);
+const isNearBottom = () => {
+  if (!messagesContainer.value) return true;
+  const { scrollTop, scrollHeight, clientHeight } = messagesContainer.value;
+  return scrollHeight - scrollTop - clientHeight < 100; // Within 100px of bottom
+};
+
+const handleScroll = () => {
+  userScrolledUp.value = !isNearBottom();
+  
+  // Show "Load older" button when user scrolls up and there are archived messages
+  if (userScrolledUp.value && archivedMessages.value.length > 0) {
+    showLoadOlder.value = true;
+  }
+};
 
 // Save messages to localStorage when they change
 watch(messages, (newMessages) => {
   try {
+    // Don't save if we only have the default welcome message and no archived messages
+    // This prevents overwriting existing chat history on component reload
+    if (newMessages.length === 1 && 
+        newMessages[0].role === 'assistant' && 
+        newMessages[0].content.includes('Hallo! Ik ben Omni') &&
+        archivedMessages.value.length === 0) {
+      console.log('[ChatPanel] Skipping save - only default welcome message');
+      return;
+    }
+    
+    console.log('[ChatPanel] Saving messages to localStorage:', newMessages.length, 'messages');
     localStorage.setItem('omni-chat-messages', JSON.stringify(newMessages));
   } catch (error) {
     console.warn('Failed to save chat messages to localStorage:', error);
@@ -142,6 +339,48 @@ if ((import.meta as any).hot) {
   // HMR preservation logic
   });
 }
+
+// Load messages and archived messages on mount
+onMounted(async () => {
+  // Setup streaming event listener
+  setupStreamingListener();
+  
+  // Load messages from persistent storage
+  const loadedMessages = await loadMessages();
+  // Use splice to maintain array reference for Vue reactivity
+  messages.value.splice(0, messages.value.length, ...loadedMessages);
+  
+  // Load archived messages
+  loadArchivedMessages();
+  
+  // If we have archived messages but no visible messages, load the most recent 10
+  if (archivedMessages.value.length > 0 && messages.value.length === 0) {
+    const toLoad = Math.min(10, archivedMessages.value.length);
+    const loaded = archivedMessages.value.splice(-toLoad, toLoad);
+    messages.value.push(...loaded);
+    
+    // Update localStorage
+    try {
+      localStorage.setItem('omni-chat-archived', JSON.stringify(archivedMessages.value));
+      localStorage.setItem('omni-chat-messages', JSON.stringify(messages.value));
+    } catch (error) {
+      console.warn('Failed to restore messages from archive:', error);
+    }
+  }
+  
+  // Archive old messages if we loaded more than MAX_VISIBLE_MESSAGES
+  if (messages.value.length > MAX_VISIBLE_MESSAGES) {
+    archiveOldMessages();
+  }
+  
+  // Scroll to bottom on initial load (instant, no animation)
+  // Use setTimeout to ensure DOM is fully rendered
+  setTimeout(() => {
+    if (messagesContainer.value) {
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    }
+  }, 0);
+});
 
 const inputMessage = ref('');
 const loading = ref(false);
@@ -175,6 +414,31 @@ const saveCommandHistory = (history: string[]) => {
 
 // Initialize command history
 commandHistory.value = loadCommandHistory();
+
+// Watch messages and auto-save to both localStorage AND persistent storage whenever they change
+watch(messages, async (newMessages) => {
+  try {
+    // Convert messages to plain objects (serialize Date objects to strings)
+    const serializedMessages = newMessages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+      timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp
+    }));
+    
+    console.log('[ChatPanel] Saving messages:', serializedMessages.length, 'messages');
+    
+    // Save to localStorage for quick access
+    localStorage.setItem('omni-chat-messages', JSON.stringify(serializedMessages));
+    
+    // Save to persistent storage (survives app restarts)
+    if (window.electronAPI && window.electronAPI.saveChatMessages) {
+      await window.electronAPI.saveChatMessages(serializedMessages);
+      console.log('[ChatPanel] Messages saved to persistent storage');
+    }
+  } catch (error) {
+    console.warn('Failed to save messages:', error);
+  }
+}, { deep: true });
 
 // Add command to history
 const addToHistory = (command: string) => {
@@ -249,6 +513,20 @@ const typewriterEffect = async (text: string, onUpdate: (partialText: string) =>
 // Activity tracking voor timeout management
 const lastProgressTime = ref(Date.now());
 const progressUpdates = ref<string[]>([]);
+const currentProgress = ref<Array<{ icon: string; text: string }>>([]);
+
+// Parse progress message to extract icon and text
+const parseProgressMessage = (msg: string): { icon: string; text: string } => {
+  // Match emoji at start of string
+  const emojiMatch = msg.match(/^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}])\s*/u);
+  if (emojiMatch) {
+    return {
+      icon: emojiMatch[1],
+      text: msg.substring(emojiMatch[0].length)
+    };
+  }
+  return { icon: '⚙️', text: msg };
+};
 
 // Setup progress listener
 if (window.electronAPI?.onChatProgress) {
@@ -259,6 +537,13 @@ if (window.electronAPI?.onChatProgress) {
     // Store progress update
     progressUpdates.value.push(progressMessage);
     
+    // Add to visual progress list (keep last 5 items)
+    const parsed = parseProgressMessage(progressMessage);
+    currentProgress.value.push(parsed);
+    if (currentProgress.value.length > 5) {
+      currentProgress.value.shift(); // Remove oldest
+    }
+    
     // Find the last assistant message and show progress IMMEDIATELY
     const lastMsg = messages.value[messages.value.length - 1];
     if (lastMsg && lastMsg.role === 'assistant' && loading.value) {
@@ -266,7 +551,7 @@ if (window.electronAPI?.onChatProgress) {
       if (!lastMsg.content.endsWith('\n')) {
         lastMsg.content += '\n';
       }
-      lastMsg.content += `**${progressMessage}**\n`;
+      lastMsg.content += `${progressMessage}\n`;
       
       await nextTick();
       scrollToBottom();
@@ -290,94 +575,137 @@ const sendMessage = async () => {
 
   inputMessage.value = '';
   loading.value = true;
+  
+  // Clear previous progress
+  currentProgress.value = [];
+  progressUpdates.value = [];
 
-  // Scroll to bottom
+  // Archive old messages if needed (before adding new response)
+  archiveOldMessages();
+
+  // Scroll to bottom and reset scroll tracking
+  userScrolledUp.value = false;
   await nextTick();
   scrollToBottom();
 
-  // Add placeholder for assistant message
+  // Generate unique request ID
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  currentRequestId.value = requestId;
+
+  // Add placeholder for assistant message with streaming support
   const assistantMessageIndex = messages.value.length;
   messages.value.push({
     role: 'assistant',
     content: '',
-    timestamp: new Date()
+    timestamp: new Date(),
+    requestId: requestId,
+    isStreaming: true
   });
 
-  let responseStarted = false;
-
   try {
-    // Call Python backend via Electron IPC met verbeterde timeout handling
-    const startTime = Date.now();
-    const response: any = await Promise.race([
-      window.electronAPI.chat(message),
-      new Promise((_, reject) => {
-        // Slimme timeout die checkt voor recente progress
-        const checkTimeout = () => {
-          const elapsed = Date.now() - startTime;
-          const sinceProgress = Date.now() - lastProgressTime.value;
-          
-          // Alleen timeout na 3 minuten met geen progress voor 45 seconden
-          if (elapsed > 180000 && sinceProgress > 45000) {
-            reject(new Error(`Request timeout after ${Math.round(elapsed/1000)}s (no progress for ${Math.round(sinceProgress/1000)}s)`));
-          } else {
-            setTimeout(checkTimeout, 10000); // Check every 10 seconds
-          }
-        };
-        setTimeout(checkTimeout, 10000);
-      })
-    ]);
+    // Call backend - streaming events will be handled by onChatEvent listener
+    // Pass requestId so backend uses the same ID as frontend
+    const response: any = await window.electronAPI.chat(message, requestId);
 
-    if (response.success) {
-      const fullText = response.data?.answer || 'No response';
-      responseStarted = true;
-      
-      // Get existing progress content
+    if (!response.success) {
+      // Handle error response
+      console.error('[ChatPanel] Chat error:', response.error);
       const lastMsg = messages.value[assistantMessageIndex];
-      const existingProgress = lastMsg.content;
-      
-      // Add separator between progress and final response if there's progress
-      const separator = existingProgress ? '\n\n---\n\n**Final Response:**\n\n' : '';
-      
-      // Use typewriter effect for the final response
-      await typewriterEffect(fullText, (partialText: string) => {
-        messages.value[assistantMessageIndex].content = existingProgress + separator + partialText;
-        scrollToBottom();
-      });
-    } else {
-      // For errors, also preserve existing progress
-      const lastMsg = messages.value[assistantMessageIndex];
-      const existingProgress = lastMsg.content;
-      const separator = existingProgress ? '\n\n---\n\n' : '';
-      messages.value[assistantMessageIndex].content = existingProgress + separator + `Error: ${response.error || 'Unknown error'}`;
+      lastMsg.content = `Error: ${response.error || 'Unknown error'}`;
+      lastMsg.isStreaming = false;
+      loading.value = false;
     }
+    // If success, leave loading=true and let stream events handle completion
   } catch (error: any) {
-    console.error('Chat error:', error);
+    console.error('[ChatPanel] Chat error:', error);
     
-    // Better error handling with context  
-    let errorMessage = `Error: ${error?.message || 'Unknown error'}`;
-    if (error.message?.includes('timeout')) {
-      if (responseStarted) {
-        errorMessage = `⚠️ Response was taking too long, but Omni may still be working in the background. Try asking "What's your status?" in a few moments.`;
-      } else {
-        errorMessage = `⚠️ Request timeout - this usually means Omni is working on a complex task. The backend is still running and may complete soon.`;
+    // Handle exception
+    const lastMsg = messages.value[assistantMessageIndex];
+    lastMsg.content = `Error: ${error?.message || 'Unknown error'}`;
+    lastMsg.isStreaming = false;
+    loading.value = false;
+  }
+  // Don't set loading=false here - let stream complete event handle it
+  
+  await nextTick();
+  scrollToBottom();
+};
+
+// Streaming event handlers
+const handleStreamComplete = (requestId: string) => {
+  // Find message and mark as complete
+  const message = messages.value.find(m => m.requestId === requestId);
+  if (message) {
+    message.isStreaming = false;
+    
+    // Get the final narrative text from StreamingResponse and save it to the message
+    const responseRef = streamingResponseRefs.value[requestId];
+    if (responseRef && responseRef.getNarrative) {
+      const finalNarrative = responseRef.getNarrative();
+      if (finalNarrative) {
+        message.content = finalNarrative;
+        console.log('[ChatPanel] 💾 Saved final narrative to message:', finalNarrative.substring(0, 50) + '...');
+        // Watcher will automatically save messages when content changes
       }
     }
-    
-    // Preserve existing progress in error case too
-    const lastMsg = messages.value[assistantMessageIndex];
-    const existingProgress = lastMsg.content;
-    const separator = existingProgress ? '\n\n---\n\n' : '';
-    messages.value[assistantMessageIndex].content = existingProgress + separator + errorMessage;
-  } finally {
-    loading.value = false;
-    await nextTick();
-    scrollToBottom();
+  }
+  
+  loading.value = false;
+  currentRequestId.value = null;
+  scrollToBottom();
+};
+
+const handleStreamError = (error: any) => {
+  console.error('[ChatPanel] Stream error:', error);
+  
+  // Show error message
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg && lastMsg.role === 'assistant') {
+    lastMsg.isStreaming = false;
+  }
+  
+  loading.value = false;
+};
+
+// Setup streaming event listener
+const setupStreamingListener = () => {
+  if (window.electronAPI?.onChatEvent) {
+    window.electronAPI.onChatEvent((event: OmniEvent) => {
+      console.log('[ChatPanel] 🔥 RECEIVED EVENT:', event.type, 'for requestId:', event.requestId);
+      
+      // Handle response_complete event to mark stream as done
+      if (event.type === 'response_complete') {
+        console.log('[ChatPanel] ✅ Handling response_complete');
+        handleStreamComplete(event.requestId);
+        return;
+      }
+      
+      // Forward all other events to the StreamingResponse component
+      const responseRef = streamingResponseRefs.value[event.requestId];
+      if (responseRef && responseRef.handleEvent) {
+        console.log('[ChatPanel] 📤 Forwarding event to StreamingResponse');
+        responseRef.handleEvent(event);
+      } else {
+        console.warn('[ChatPanel] ⚠️ No StreamingResponse ref found for:', event.requestId);
+      }
+    });
+  } else {
+    console.warn('[ChatPanel] onChatEvent API not available');
   }
 };
 
-const scrollToBottom = () => {
-  if (messagesContainer.value) {
-    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+const scrollToBottom = (force = false, instant = false) => {
+  if (messagesContainer.value && (force || !userScrolledUp.value)) {
+    if (instant) {
+      // Instant scroll without animation (for initial load)
+      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+    } else {
+      // Smooth scroll
+      messagesContainer.value.scrollTo({
+        top: messagesContainer.value.scrollHeight,
+        behavior: 'smooth'
+      });
+    }
   }
 };
 
@@ -398,8 +726,13 @@ const clearChat = () => {
     content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
     timestamp: new Date()
   };
-  messages.value = [welcomeMessage];
+  // Use splice to maintain array reference for Vue reactivity
+  messages.value.splice(0, messages.value.length, welcomeMessage);
   localStorage.removeItem('omni-chat-messages');
+  
+  // Clear archived messages
+  archivedMessages.value.splice(0, archivedMessages.value.length);
+  localStorage.removeItem('omni-chat-archived');
   
   // Also clear command history
   commandHistory.value = [];
@@ -411,8 +744,6 @@ const clearChat = () => {
 const inlineChatRef = ref();
 
 const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
-  console.log('Inline chat submit:', { prompt, selection });
-  
   // Add user message to chat
   const userMessage: Message = {
     role: 'user',
@@ -544,6 +875,54 @@ const formatTime = (date: Date) => {
     minute: '2-digit'
   });
 };
+
+/**
+ * Parse message content into text and file reference parts
+ * Returns an array of parts with type 'text' or 'file'
+ */
+interface MessagePart {
+  type: 'text' | 'file';
+  value: string;
+}
+
+const parseMessageContent = (content: string): MessagePart[] => {
+  const parts: MessagePart[] = [];
+  
+  // Pattern to match file references with common extensions
+  // Matches: filename.ext, path/to/file.ext, `filename.ext`
+  const filePattern = /(?:^|\s)(`?([a-zA-Z0-9_\-]+(?:\/[a-zA-Z0-9_\-]+)*\.(vue|ts|js|jsx|tsx|py|css|html|json|md|txt))`?)(?=\s|$|[,.:!?])/gi;
+  
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = filePattern.exec(content)) !== null) {
+    // Add text before the file reference
+    if (match.index > lastIndex) {
+      const textBefore = content.substring(lastIndex, match.index);
+      if (textBefore) {
+        parts.push({ type: 'text', value: textBefore });
+      }
+    }
+    
+    // Add the file reference (remove backticks if present)
+    const filePath = match[2];
+    parts.push({ type: 'file', value: filePath });
+    
+    lastIndex = match.index + match[0].length;
+  }
+  
+  // Add remaining text
+  if (lastIndex < content.length) {
+    parts.push({ type: 'text', value: content.substring(lastIndex) });
+  }
+  
+  // If no file references found, return the whole content as text
+  if (parts.length === 0) {
+    parts.push({ type: 'text', value: content });
+  }
+  
+  return parts;
+};
 </script>
 
 <style scoped>
@@ -560,7 +939,7 @@ const formatTime = (date: Date) => {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-3) var(--space-4);
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
   border-bottom: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-sm);
 }
@@ -616,6 +995,54 @@ const formatTime = (date: Date) => {
   flex-direction: column;
   gap: var(--space-4);
   max-width: 100%;
+  /* scroll-behavior removed - controlled via JS for instant vs smooth */
+}
+
+.load-older-container {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) 0;
+  margin-bottom: var(--space-2);
+}
+
+.load-older-button {
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.load-older-button:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.loading-older {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.spinner-small {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border-medium);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
 }
 
 .message {
@@ -704,6 +1131,25 @@ const formatTime = (date: Date) => {
   font-weight: var(--font-weight-semibold);
 }
 
+.streaming-badge {
+  font-size: var(--font-size-xs);
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-primary-border);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
 .timestamp {
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
@@ -750,13 +1196,89 @@ const formatTime = (date: Date) => {
   }
 }
 
+/* Progress section styles */
+.progress-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  font-size: var(--font-size-sm);
+}
+
+.progress-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: rgba(59, 130, 246, 0.05);
+  border-left: 2px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  animation: slideInLeft 0.3s ease-out;
+}
+
+.progress-icon {
+  font-size: 1.2em;
+  flex-shrink: 0;
+}
+
+.progress-text {
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.activity-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-primary);
+  font-size: var(--font-size-xs);
+}
+
+.spinner-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-primary);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.activity-text {
+  font-weight: var(--font-weight-medium);
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .input-area {
   display: flex;
+  flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-4);
   background: var(--color-bg-secondary);
   border-top: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-inner);
+}
+
+.input-buttons {
+  display: flex;
+  gap: var(--space-2);
+  align-self: flex-start;
 }
 
 .message-input {

@@ -161,11 +161,6 @@ const buildFileTree = () => {
   };
   sortChildren(root);
   
-  console.log('[FileExplorer] Tree built with', root.length, 'root items');
-  if (root.length > 0) {
-    console.log('[FileExplorer] First root item:', root[0].name, root[0].isDirectory);
-  }
-  
   fileTree.value = root;
   fileTreeMap.value = map;
 };
@@ -174,16 +169,12 @@ const loadFiles = async () => {
   loading.value = true;
   error.value = '';
   try {
-    console.log('[FileExplorer] Loading files recursively from "."');
     const response = await (window.electronAPI as any).listFilesRecursive('.', {
       maxDepth: 10,
       excludePatterns: ['node_modules', '__pycache__', '.DS_Store', 'Thumbs.db']
     });
-    console.log('[FileExplorer] Response:', response);
     if (response.success) {
       files.value = response.data?.files || [];
-      console.log('[FileExplorer] Loaded files:', files.value.length, 'files');
-      console.log('[FileExplorer] First 10 files:', files.value.slice(0, 10));
       
       // Build tree once after loading
       buildFileTree();
