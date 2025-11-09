@@ -154,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, defineAsyncComponent, computed } from 'vue';
+import { ref, defineAsyncComponent, computed, onMounted } from 'vue';
 import { useSystem } from './composables/useSystem';
 import { useResizable } from './composables/useResizable';
 import ThemeToggle from './components/ThemeToggle.vue';
@@ -185,6 +185,16 @@ const currentTheme = computed(() => {
 // File loading state
 const loadingFile = ref(false);
 const fileError = ref<string | null>(null);
+
+// Listen for file open requests from chat file references
+onMounted(() => {
+  if (window.electronAPI && window.electronAPI.onOpenFile) {
+    window.electronAPI.onOpenFile((filePath: string) => {
+      console.log('📂 [App] Received open-file request:', filePath);
+      handleFileSelected(filePath);
+    });
+  }
+});
 
 // Resizable panels
 const chatPanel = useResizable({

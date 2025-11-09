@@ -14,9 +14,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * Send a chat message to the LLM
    * @param {string} message - User message
+   * @param {string} [requestId] - Optional request ID for streaming correlation
    * @returns {Promise<{success: boolean, data?: any, error?: string}>}
    */
-  chat: (message) => ipcRenderer.invoke('chat', message),
+  chat: (message, requestId) => ipcRenderer.invoke('chat', message, requestId),
 
   /**
    * List available LLM models
@@ -53,6 +54,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
 
   /**
+   * Open a file in the editor
+   * @param {string} filePath - Path to the file to open
+   * @returns {Promise<void>}
+   */
+  openFile: (filePath) => ipcRenderer.invoke('open-file', filePath),
+
+  /**
+   * Save chat messages to persistent storage
+   * @param {Array} messages - Array of chat messages
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  saveChatMessages: (messages) => ipcRenderer.invoke('save-chat-messages', messages),
+
+  /**
+   * Load chat messages from persistent storage
+   * @returns {Promise<{success: boolean, data?: Array, error?: string}>}
+   */
+  loadChatMessages: () => ipcRenderer.invoke('load-chat-messages'),
+
+  /**
    * Listen for chat progress updates
    * @param {function} callback - Called with progress message
    */
@@ -61,11 +82,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   /**
+   * Listen for streaming chat events (new streaming protocol)
+   * @param {function} callback - Called with streaming event object
+   */
+  onChatEvent: (callback) => {
+    ipcRenderer.on('chat:event', (event, eventData) => callback(eventData));
+  },
+
+  /**
    * Listen for terminal log updates
    * @param {function} callback - Called with log data
    */
   onTerminalLog: (callback) => {
     ipcRenderer.on('terminal-log', (event, data) => callback(data));
+  },
+
+  /**
+   * Listen for file open requests from main process
+   * @param {function} callback - Called with file path
+   */
+  onOpenFile: (callback) => {
+    ipcRenderer.on('open-file-in-editor', (event, filePath) => callback(filePath));
   },
 
   /**
@@ -78,6 +115,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   removeChatProgressListener: () => {
     ipcRenderer.removeAllListeners('chat-progress');
+  },
+
+  /**
+   * Remove chat event listener  
+   */
+  removeChatEventListener: () => {
+    ipcRenderer.removeAllListeners('chat:event');
   },
 
   /**

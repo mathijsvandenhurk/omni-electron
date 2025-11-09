@@ -179,12 +179,7 @@ const getFileIcon = (uri: string): string => {
 };
 
 const selectTab = (uri: string) => {
-  console.log('🔍 DEBUG [TabBar.selectTab]: Called with URI:', uri);
-  console.log('🔍 DEBUG [TabBar.selectTab]: Current active tab:', props.activeTabUri);
-  console.log('🔍 DEBUG [TabBar.selectTab]: Available tabs:', props.tabs.map(t => t.uri));
-  console.log('🔍 DEBUG [TabBar.selectTab]: Emitting selectTab event');
   emit('selectTab', uri);
-  console.log('🔍 DEBUG [TabBar.selectTab]: Event emitted successfully');
 };
 
 const closeTab = (uri: string) => {

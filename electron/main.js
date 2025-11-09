@@ -144,7 +144,7 @@ function startPythonBackend() {
       });
     }
 
-    pythonProcess = spawn(pythonExecutable, [pythonScript], {
+    pythonProcess = spawn(pythonExecutable, ['-u', pythonScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
       // Performance optimizations for subprocess
       detached: false,
@@ -168,6 +168,9 @@ function startPythonBackend() {
 
   // Handle Python stdout (JSON-RPC responses)
   pythonProcess.stdout.on('data', (data) => {
+    // DEBUG: Log RAW stdout data
+    console.log('[Electron] 🔥 RAW STDOUT:', data.toString());
+    
     const lines = data.toString().split('\n').filter(line => line.trim());
     
     for (const line of lines) {
@@ -183,7 +186,20 @@ function startPythonBackend() {
       try {
         const response = JSON.parse(line);
         
-        // Forward response to renderer
+        // Check if this is a streaming event notification (chat_event)
+        if (response.method === 'chat_event' && response.params) {
+          console.log('[Electron] 🚀 SENDING chat:event to renderer:', response.params.type);
+          // Forward streaming event to renderer
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('chat:event', response.params);
+            console.log('[Electron] ✅ chat:event SENT');
+          } else {
+            console.log('[Electron] ❌ mainWindow unavailable!');
+          }
+          continue; // Don't treat as regular response
+        }
+        
+        // Forward response to renderer (regular JSON-RPC)
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('python-response', response);
         }
@@ -364,11 +380,30 @@ function callPython(method, params = {}) {
  * IPC Handlers - Called from renderer process
  */
 
-// Chat with LLM
-ipcMain.handle('chat', async (event, message) => {
+// Chat with LLM (streaming version)
+ipcMain.handle('chat', async (event, message, requestId) => {
+  console.log('[Electron] Chat request received:', message.substring(0, 50) + '...');
   try {
-    const result = await callPython('chat', { message });
-    return { success: true, data: result };
+    // Use provided requestId from frontend, or generate new one if not provided
+    const request_id = requestId || `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    console.log('[Electron] Starting streaming chat with request_id:', request_id);
+    
+    // Send request to Python backend - don't await response
+    // Events will be forwarded via 'chat:event' as they arrive
+    const id = ++messageId;
+    const request = {
+      jsonrpc: '2.0',
+      id,
+      method: 'chat',
+      params: { message, request_id }
+    };
+    
+    pythonProcess.stdin.write(JSON.stringify(request) + '\n');
+    
+    // Return immediately with request_id - events will stream separately
+    console.log('[Electron] Streaming started, events will be forwarded to renderer');
+    return { success: true, request_id };
   } catch (error) {
     console.error('[Electron] Chat error:', error);
     return { success: false, error: error.message };
@@ -559,6 +594,119 @@ ipcMain.handle('read-file', async (event, filePath) => {
     };
   } catch (error) {
     console.error('[Electron] Read file error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Open file in editor (sends to renderer to handle)
+ipcMain.handle('open-file', async (event, filePath) => {
+  try {
+    const projectRoot = process.cwd();
+    let fullPath;
+    
+    // If path is already absolute and starts with project root, use it
+    if (path.isAbsolute(filePath) && filePath.startsWith(projectRoot)) {
+      fullPath = filePath;
+    } 
+    // If it's a relative path or just a filename, try to resolve it
+    else {
+      // First try: resolve relative to project root
+      fullPath = path.resolve(projectRoot, filePath);
+      
+      // If file doesn't exist, try to find it recursively in common directories
+      try {
+        await fs.access(fullPath);
+      } catch {
+        // Common directories to search
+        const searchDirs = [
+          'src/components',
+          'src',
+          'backend',
+          'electron',
+          'docs',
+          '.'
+        ];
+        
+        let found = false;
+        for (const dir of searchDirs) {
+          const testPath = path.resolve(projectRoot, dir, filePath);
+          try {
+            await fs.access(testPath);
+            fullPath = testPath;
+            found = true;
+            console.log(`[Electron] Found file: ${testPath}`);
+            break;
+          } catch {
+            // Continue searching
+          }
+        }
+        
+        if (!found) {
+          throw new Error(`File not found: ${filePath}`);
+        }
+      }
+    }
+    
+    // Security check - ensure resolved path is within project
+    if (!fullPath.startsWith(projectRoot)) {
+      throw new Error('Access denied: Path outside project directory');
+    }
+    
+    // Final existence check
+    await fs.access(fullPath);
+    
+    console.log(`[Electron] Opening file: ${fullPath}`);
+    
+    // Send event to renderer to open the file
+    // The renderer will handle opening it in Monaco or appropriate viewer
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('open-file-in-editor', fullPath);
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('[Electron] Open file error:', error);
+    throw error;
+  }
+});
+
+// Save chat messages to persistent file
+ipcMain.handle('save-chat-messages', async (event, messages) => {
+  try {
+    const userDataPath = app.getPath('userData');
+    const chatFilePath = path.join(userDataPath, 'chat-messages.json');
+    
+    await fs.writeFile(chatFilePath, JSON.stringify(messages, null, 2), 'utf-8');
+    console.log('[Electron] Chat messages saved:', messages.length, 'messages');
+    
+    return { success: true };
+  } catch (error) {
+    console.error('[Electron] Save chat messages error:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Load chat messages from persistent file
+ipcMain.handle('load-chat-messages', async (event) => {
+  try {
+    const userDataPath = app.getPath('userData');
+    const chatFilePath = path.join(userDataPath, 'chat-messages.json');
+    
+    try {
+      const data = await fs.readFile(chatFilePath, 'utf-8');
+      const messages = JSON.parse(data);
+      console.log('[Electron] Chat messages loaded:', messages.length, 'messages');
+      return { success: true, data: messages };
+    } catch (err) {
+      // File doesn't exist yet, return empty array
+      if (err.code === 'ENOENT') {
+        console.log('[Electron] No saved chat messages found');
+        return { success: true, data: [] };
+      }
+      throw err;
+    }
+  } catch (error) {
+    console.error('[Electron] Load chat messages error:', error);
     return { success: false, error: error.message };
   }
 });
