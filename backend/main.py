@@ -354,7 +354,7 @@ class OmniBackend:
                 },
                 {
                     "name": "replace_in_file",
-                    "description": "Vervang specifieke tekst in een bestand. PREFERRED for code edits.",
+                    "description": "GEBRUIK DEZE TOOL OM CODE TE WIJZIGEN! Vervang specifieke tekst in een bestand. Dit is de PRIMAIRE tool voor alle code edits, styling changes, en bug fixes. ALTIJD gebruiken wanneer de user vraagt iets te veranderen!",
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -403,13 +403,25 @@ class OmniBackend:
             ]
             
             # Stream LLM response with tool calling
+            # ADAPTIVE ITERATION LIMIT: Start with 5, extend dynamically if making progress
             max_iterations = 5
+            max_extended_iterations = 12  # Safety ceiling (lowered from 15 to avoid rate limits)
             iteration = 0
             accumulated_text = ""
+            write_tools_executed = set()  # Track if any write operations were performed
+            read_tool_count = 0  # Track consecutive reads without writes
             
             while iteration < max_iterations:
                 iteration += 1
                 logger.info(f"[Streaming] Iteration {iteration}/{max_iterations}")
+                
+                # EARLY EXIT: If write operations were done and model responds without tools, we're done
+                if iteration > 3 and write_tools_executed and not accumulated_text.endswith('...'):
+                    logger.info(f"[Early exit] Write operations completed, stopping at iteration {iteration}")
+                    break
+                
+                # NOTE: Tool choice forcing removed - caused 400 Bad Request errors
+                # Instead, we rely on the guidance prompt injection (below) to redirect behavior
                 
                 # Stream from LLM (async)
                 tool_uses = []
@@ -520,12 +532,19 @@ class OmniBackend:
                 })
                 logger.info(f"[Streaming] Added assistant message with {len(assistant_content)} blocks (text + tool_use)")
                 
-                # Execute tools
+                # Execute tools and track progress
                 tool_results = []
                 for tool_use in tool_uses:
                     tool_name = tool_use['name']
                     tool_args = tool_use['input']
                     tool_id = tool_use['id']
+                    
+                    # Track tool types for adaptive iteration management
+                    if tool_name in ['replace_in_file', 'write_file']:
+                        write_tools_executed.add(tool_name)
+                        read_tool_count = 0  # Reset read counter when we do a write
+                    elif tool_name in ['read_file', 'search_in_file', 'list_files']:
+                        read_tool_count += 1
                     
                     logger.info(f"[Streaming] Executing tool: {tool_name} with args: {tool_args}")
                     
@@ -567,14 +586,38 @@ class OmniBackend:
                             "content": json.dumps({"error": error_msg})
                         })
                 
+                # ADAPTIVE ITERATION EXTENSION: Extend limit if we're making progress toward task completion
                 # Add tool results to conversation for next iteration
                 # IMPORTANT: tool_results must go in a USER message, not assistant!
-                # The assistant message with tool_use blocks is already in the conversation
-                # from the previous streaming response
                 messages.append({
                     "role": "user",
                     "content": tool_results
                 })
+                
+                # EARLY EXIT CONDITION: If we've done write operations and we're past iteration 4, check if we should stop
+                # This prevents over-optimization (continuing to make small tweaks after task is complete)
+                if iteration >= 4 and write_tools_executed:
+                    logger.info(f"[Early exit check] {len(write_tools_executed)} write tool(s) executed. Giving model one more chance to confirm completion...")
+                    # Let the model respond one more time to confirm completion or do final touches
+                    # If it doesn't use tools, the "No tools called" check above will stop the loop
+                
+                # ADAPTIVE ITERATION EXTENSION: After adding tool results, check if we should extend
+                # Pattern: Many reads followed by writes = analysis → implementation workflow
+                if iteration == max_iterations - 1 and max_iterations < max_extended_iterations:
+                    # Check if we're in "analysis phase" (many reads, no writes yet)
+                    if read_tool_count >= 2 and not write_tools_executed:
+                        logger.warning(f"[Adaptive] Detected analysis-only pattern ({read_tool_count} reads, 0 writes). Extending iterations by 5.")
+                        max_iterations += 5
+                        max_iterations = min(max_iterations, max_extended_iterations)  # Cap at safety limit
+                        
+                        # Inject guidance AFTER tool results (as separate user message)
+                        # This keeps conversation valid: assistant (with tools) → user (tool results) → user (guidance)
+                        # Note: Multiple consecutive user messages are allowed in Anthropic API
+                        implementation_prompt = {
+                            "role": "user",
+                            "content": "Je hebt nu genoeg informatie verzameld via read/search tools. Focus nu op het IMPLEMENTEREN van de wijzigingen met replace_in_file. Maak de code changes die nodig zijn!"
+                        }
+                        messages.append(implementation_prompt)
             
             # Store in memory
             self.memory.add(text=message, kind="user")

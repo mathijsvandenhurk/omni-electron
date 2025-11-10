@@ -4,7 +4,7 @@
       <div class="header-left">
         <h3>Chat met Omni</h3>
         <span v-if="commandHistory.length > 0" class="history-indicator">
-          📚 {{ commandHistory.length }}/{{ maxHistorySize }} history
+          📚 {{ commandHistory.length }}/{{ MAX_HISTORY }} history
         </span>
       </div>
       <button @click="clearChat" class="clear-button" title="Wis chat geschiedenis en command history">
@@ -54,15 +54,64 @@
                 <span v-if="msg.isStreaming" class="streaming-badge">Streaming...</span>
               </div>
               
-              <!-- New: Use StreamingResponse for messages with requestId -->
+              <!-- Use StreamingResponse for actively streaming messages -->
               <StreamingResponse
-                v-if="msg.requestId"
+                v-if="msg.requestId && msg.isStreaming"
                 :ref="el => registerStreamingRef(el, msg.requestId!)"
                 :request-id="msg.requestId"
                 :auto-scroll="true"
                 @complete="handleStreamComplete"
                 @error="handleStreamError"
               />
+              
+              <!-- For completed messages, show preserved data -->
+              <div v-else-if="msg.tools || msg.codeChanges || msg.fileReferences || msg.metadata" class="message-content preserved-response">
+                <!-- Narrative content -->
+                <div v-if="msg.content" class="narrative-section" v-html="renderMarkdown(msg.content)"></div>
+                
+                <!-- Tools section -->
+                <ToolExecutionTree 
+                  v-if="msg.tools && msg.tools.length > 0"
+                  :tools="msg.tools"
+                  class="tools-section"
+                />
+                
+                <!-- Code changes -->
+                <div v-if="msg.codeChanges && msg.codeChanges.length > 0" class="code-changes-section">
+                  <h3>Code wijzigingen</h3>
+                  <CodeChangeViewer 
+                    v-for="(change, idx) in msg.codeChanges"
+                    :key="`code-${idx}`"
+                    :file-path="change.file"
+                    :code="change.code"
+                    :language="change.language"
+                    :line-range="`${change.lineStart} - ${change.lineEnd}`"
+                  />
+                </div>
+                
+                <!-- File references -->
+                <div v-if="msg.fileReferences && msg.fileReferences.length > 0" class="file-references">
+                  <h3>Bestanden</h3>
+                  <FileReference 
+                    v-for="(ref, idx) in msg.fileReferences"
+                    :key="`ref-${idx}`"
+                    :path="ref.path"
+                  />
+                </div>
+                
+                <!-- Metadata footer -->
+                <div v-if="msg.metadata" class="response-metadata">
+                  <span v-if="msg.metadata.duration" class="duration">
+                    Duur: {{ formatDuration(msg.metadata.duration) }}
+                  </span>
+                  <span v-if="msg.metadata.toolsExecuted && msg.metadata.toolsExecuted.length > 0" class="tools-count">
+                    Tools: {{ msg.metadata.toolsExecuted.length }}
+                  </span>
+                  <span v-if="msg.metadata.filesModified && msg.metadata.filesModified.length > 0" class="files-count">
+                    Bestanden: {{ msg.metadata.filesModified.length }}
+                  </span>
+                </div>
+              </div>
               
               <!-- Fallback: Old-style content display for backwards compatibility -->
               <div v-else class="message-content">
@@ -109,28 +158,35 @@
     </div>
 
     <div class="input-area">
-      <textarea
-        ref="inputTextarea"
-        v-model="inputMessage"
-        @keydown.enter.exact.prevent="sendMessage"
-        @keydown.shift.enter.prevent="handleShiftEnter"
-        @keydown.up="handleArrowUp"
-        @keydown.down="handleArrowDown"
-        placeholder="Type a message... (Enter to send, Shift+Enter for new line, ↑↓ voor history)"
-        :disabled="loading"
-        class="message-input"
-        rows="5"
-      />
-      <button 
-        @click="loading ? abortRequest() : sendMessage()" 
-        :disabled="!loading && !inputMessage.trim()" 
-        class="action-button"
-        :class="{ 'stop-mode': loading }"
-        :title="loading ? 'Stop huidige actie' : 'Verstuur bericht'"
-      >
-        <span v-if="loading">⏹️</span>
-        <span v-else>▶️</span>
-      </button>
+      <div class="input-container">
+        <textarea
+          ref="inputTextarea"
+          v-model="inputMessage"
+          @keydown.enter.exact.prevent="sendMessage"
+          @keydown.shift.enter.prevent="handleShiftEnter"
+          @keydown.up="handleArrowUp"
+          @keydown.down="handleArrowDown"
+          placeholder="Type a message... (Enter to send, Shift+Enter for new line, ↑↓ voor history)"
+          :disabled="loading"
+          class="message-input"
+          rows="5"
+        />
+        <button 
+          @click="loading ? abortRequest() : sendMessage()" 
+          :disabled="!loading && !inputMessage.trim()" 
+          class="play-stop-button"
+          :class="{ 'stop-mode': loading }"
+          :title="loading ? 'Stop huidige actie' : 'Verstuur bericht'"
+        >
+          <svg v-if="loading" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="4" width="4" height="16" />
+            <rect x="14" y="4" width="4" height="16" />
+          </svg>
+          <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <!-- Inline Chat Component -->
@@ -143,10 +199,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted, computed } from 'vue';
+import { ref, nextTick, watch, onMounted, onBeforeUnmount, computed } from 'vue';
+import { marked } from 'marked';
 import InlineChat from './InlineChat.vue';
 import FileReference from './FileReference.vue';
 import StreamingResponse from './StreamingResponse.vue';
+import ToolExecutionTree from './ToolExecutionTree.vue';
+import CodeChangeViewer from './CodeChangeViewer.vue';
 import type { OmniEvent } from '../types/events';
 
 interface Message {
@@ -155,6 +214,36 @@ interface Message {
   timestamp: Date;
   requestId?: string;  // For tracking streaming responses
   isStreaming?: boolean;  // Whether this message is still streaming
+  // Streaming response data (preserved after completion)
+  tools?: Array<{
+    name: string;
+    args: any;
+    result?: any;
+    status: 'pending' | 'running' | 'success' | 'error';
+    startTime: number;
+    duration?: number;
+    error?: string;
+  }>;
+  codeChanges?: Array<{
+    file: string;
+    lineStart: number;
+    lineEnd: number;
+    code: string;
+    language: string;
+  }>;
+  fileReferences?: Array<{
+    path: string;
+    lineStart?: number;
+    lineEnd?: number;
+    context?: string;
+  }>;
+  metadata?: {
+    requestId: string;
+    duration: number;
+    tokensUsed: number;
+    toolsExecuted: string[];
+    filesModified: string[];
+  };
 }
 
 // Load messages from persistent storage on component creation
@@ -215,7 +304,6 @@ const currentRequestId = ref<string | null>(null);
 // Function to register StreamingResponse refs
 const registerStreamingRef = (el: any, requestId: string) => {
   if (el && requestId) {
-    console.log('[ChatPanel] 📝 Registering StreamingResponse ref for:', requestId);
     streamingResponseRefs.value[requestId] = el;
   }
 };
@@ -326,11 +414,9 @@ watch(messages, (newMessages) => {
         newMessages[0].role === 'assistant' && 
         newMessages[0].content.includes('Hallo! Ik ben Omni') &&
         archivedMessages.value.length === 0) {
-      console.log('[ChatPanel] Skipping save - only default welcome message');
       return;
     }
     
-    console.log('[ChatPanel] Saving messages to localStorage:', newMessages.length, 'messages');
     localStorage.setItem('omni-chat-messages', JSON.stringify(newMessages));
   } catch (error) {
     console.warn('Failed to save chat messages to localStorage:', error);
@@ -346,6 +432,11 @@ if ((import.meta as any).hot) {
 
 // Load messages and archived messages on mount
 onMounted(async () => {
+  // Clean up any existing listeners first (important for HMR)
+  if (window.electronAPI?.removeChatEventListener) {
+    window.electronAPI.removeChatEventListener();
+  }
+  
   // Setup streaming event listener
   setupStreamingListener();
   
@@ -386,6 +477,15 @@ onMounted(async () => {
   }, 0);
 });
 
+// Cleanup on unmount (for proper component lifecycle)
+onBeforeUnmount(() => {
+  if (window.electronAPI?.removeChatEventListener) {
+    window.electronAPI.removeChatEventListener();
+  }
+  // Clear global handler reference
+  globalEventHandler = null;
+});
+
 const inputMessage = ref('');
 const loading = ref(false);
 const messagesContainer = ref<HTMLElement | null>(null);
@@ -394,23 +494,35 @@ const inputTextarea = ref<HTMLTextAreaElement | null>(null);
 // Command history management
 const commandHistory = ref<string[]>([]);
 const historyIndex = ref(-1);
-const maxHistorySize = 30;
+const MAX_HISTORY = 20;
 
-// Load command history from localStorage
+// Load command history from localStorage with validation
 const loadCommandHistory = (): string[] => {
   try {
     const saved = localStorage.getItem('omni-command-history');
-    return saved ? JSON.parse(saved) : [];
+    if (!saved) return [];
+    
+    const parsed = JSON.parse(saved);
+    // Validate: must be array of strings
+    if (!Array.isArray(parsed)) return [];
+    
+    const validated = parsed.filter(item => typeof item === 'string' && item.trim().length > 0);
+    return validated.slice(0, MAX_HISTORY); // Ensure max limit
   } catch (error) {
     console.warn('Failed to load command history:', error);
     return [];
   }
 };
 
-// Save command history to localStorage
+// Save command history to localStorage with validation
 const saveCommandHistory = (history: string[]) => {
   try {
-    localStorage.setItem('omni-command-history', JSON.stringify(history));
+    // Validate before saving
+    const validated = history
+      .filter(item => typeof item === 'string' && item.trim().length > 0)
+      .slice(0, MAX_HISTORY);
+    
+    localStorage.setItem('omni-command-history', JSON.stringify(validated));
   } catch (error) {
     console.warn('Failed to save command history:', error);
   }
@@ -429,15 +541,12 @@ watch(messages, async (newMessages) => {
       timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp
     }));
     
-    console.log('[ChatPanel] Saving messages:', serializedMessages.length, 'messages');
-    
     // Save to localStorage for quick access
     localStorage.setItem('omni-chat-messages', JSON.stringify(serializedMessages));
     
     // Save to persistent storage (survives app restarts)
     if (window.electronAPI && window.electronAPI.saveChatMessages) {
       await window.electronAPI.saveChatMessages(serializedMessages);
-      console.log('[ChatPanel] Messages saved to persistent storage');
     }
   } catch (error) {
     console.warn('Failed to save messages:', error);
@@ -451,8 +560,8 @@ const addToHistory = (command: string) => {
     commandHistory.value.unshift(trimmedCommand);
     
     // Limit history size
-    if (commandHistory.value.length > maxHistorySize) {
-      commandHistory.value = commandHistory.value.slice(0, maxHistorySize);
+    if (commandHistory.value.length > MAX_HISTORY) {
+      commandHistory.value = commandHistory.value.slice(0, MAX_HISTORY);
     }
     
     saveCommandHistory(commandHistory.value);
@@ -462,7 +571,9 @@ const addToHistory = (command: string) => {
 
 // Navigate through history
 const navigateHistory = (direction: 'up' | 'down') => {
-  if (commandHistory.value.length === 0) return;
+  if (commandHistory.value.length === 0) {
+    return;
+  }
   
   if (direction === 'up') {
     if (historyIndex.value < commandHistory.value.length - 1) {
@@ -642,15 +753,19 @@ const handleStreamComplete = (requestId: string) => {
   if (message) {
     message.isStreaming = false;
     
-    // Get the final narrative text from StreamingResponse and save it to the message
+    // Get ALL data from StreamingResponse and save it to the message
     const responseRef = streamingResponseRefs.value[requestId];
-    if (responseRef && responseRef.getNarrative) {
-      const finalNarrative = responseRef.getNarrative();
-      if (finalNarrative) {
-        message.content = finalNarrative;
-        console.log('[ChatPanel] 💾 Saved final narrative to message:', finalNarrative.substring(0, 50) + '...');
-        // Watcher will automatically save messages when content changes
-      }
+    if (responseRef && responseRef.getAllData) {
+      const allData = responseRef.getAllData();
+      
+      // Save all the data to the message for persistence
+      message.content = allData.narrative || '';
+      message.tools = allData.tools;
+      message.codeChanges = allData.codeChanges;
+      message.fileReferences = allData.fileReferences;
+      message.metadata = allData.metadata;
+      
+      // Watcher will automatically save messages when content changes
     }
   }
   
@@ -662,31 +777,56 @@ const handleStreamComplete = (requestId: string) => {
 const handleStreamError = (error: any) => {
   console.error('[ChatPanel] Stream error:', error);
   
-  // Show error message
+  // CRITICAL: Preserve data before marking as complete
+  // Find the message that was streaming
   const lastMsg = messages.value[messages.value.length - 1];
-  if (lastMsg && lastMsg.role === 'assistant') {
+  if (lastMsg && lastMsg.role === 'assistant' && lastMsg.requestId) {
+    // Get ALL data from StreamingResponse BEFORE marking as complete
+    const responseRef = streamingResponseRefs.value[lastMsg.requestId];
+    if (responseRef && responseRef.getAllData) {
+      const allData = responseRef.getAllData();
+      
+      // Save all the data to the message for persistence
+      lastMsg.content = allData.narrative || '';
+      lastMsg.tools = allData.tools;
+      lastMsg.codeChanges = allData.codeChanges;
+      lastMsg.fileReferences = allData.fileReferences;
+      lastMsg.metadata = allData.metadata;
+    }
+    
+    // NOW mark as complete
     lastMsg.isStreaming = false;
   }
   
   loading.value = false;
 };
 
+// Global event handler reference (singleton pattern for HMR compatibility)
+// This ensures we don't create multiple listeners during hot reload
+let globalEventHandler: ((event: OmniEvent) => void) | null = null;
+
 // Setup streaming event listener
 const setupStreamingListener = () => {
   if (window.electronAPI?.onChatEvent) {
-    window.electronAPI.onChatEvent((event: OmniEvent) => {
-      console.log('[ChatPanel] 🔥 RECEIVED EVENT:', event.type, 'for requestId:', event.requestId);
-      
+    // Remove old handler if it exists (hot reload cleanup)
+    if (globalEventHandler) {
+      // Note: Electron IPC doesn't provide removeListener, but we can overwrite
+    }
+    
+    // Create new handler
+    globalEventHandler = (event: OmniEvent) => {
       // Forward ALL events to the StreamingResponse component
       // (including response_complete, which triggers the @complete event)
       const responseRef = streamingResponseRefs.value[event.requestId];
       if (responseRef && responseRef.handleEvent) {
-        console.log('[ChatPanel] 📤 Forwarding event to StreamingResponse');
         responseRef.handleEvent(event);
       } else {
-        console.warn('[ChatPanel] ⚠️ No StreamingResponse ref found for:', event.requestId);
+        console.warn('[ChatPanel] No StreamingResponse ref found for:', event.requestId);
       }
-    });
+    };
+    
+    // Register the handler
+    window.electronAPI.onChatEvent(globalEventHandler);
   } else {
     console.warn('[ChatPanel] onChatEvent API not available');
   }
@@ -732,10 +872,8 @@ const clearChat = () => {
   archivedMessages.value.splice(0, archivedMessages.value.length);
   localStorage.removeItem('omni-chat-archived');
   
-  // Also clear command history
-  commandHistory.value = [];
-  historyIndex.value = -1;
-  localStorage.removeItem('omni-command-history');
+  // NOTE: We DO NOT clear command history - it's useful to keep it like a terminal
+  // Users can still use ↑↓ arrows to recall previous commands even after clearing chat
 };
 
 // InlineChat handlers
@@ -872,6 +1010,27 @@ const formatTime = (date: Date) => {
     hour: '2-digit',
     minute: '2-digit'
   });
+};
+
+const formatDuration = (ms: number): string => {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  } else if (ms < 60000) {
+    return `${(ms / 1000).toFixed(1)}s`;
+  } else {
+    const minutes = Math.floor(ms / 60000);
+    const seconds = ((ms % 60000) / 1000).toFixed(0);
+    return `${minutes}m ${seconds}s`;
+  }
+};
+
+const renderMarkdown = (text: string): string => {
+  try {
+    return marked(text) as string;
+  } catch (err) {
+    console.error('Markdown parsing error:', err);
+    return text;
+  }
 };
 
 /**
@@ -1068,7 +1227,7 @@ const parseMessageContent = (content: string): MessagePart[] => {
 .message.user .message-content {
   max-width: var(--chat-message-max-width, 70%);
   padding: var(--space-3) var(--space-4);
-  background: var(--color-primary-light);
+  background: rgba(59, 130, 246, 0.1);
   color: var(--color-text-primary);
   border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
   border: 1px solid var(--color-primary-border);
@@ -1273,6 +1432,12 @@ const parseMessageContent = (content: string): MessagePart[] => {
   box-shadow: var(--shadow-inner);
 }
 
+.input-container {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+}
+
 .input-buttons {
   display: flex;
   gap: var(--space-2);
@@ -1374,6 +1539,53 @@ const parseMessageContent = (content: string): MessagePart[] => {
   cursor: not-allowed;
   background: var(--color-bg-tertiary);
   color: var(--color-text-muted);
+}
+
+/* Preserved response (completed streaming messages) */
+.preserved-response {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 100%;
+}
+
+.preserved-response .narrative-section {
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+
+.preserved-response .narrative-section :deep(p) {
+  margin: 0.5rem 0;
+}
+
+.preserved-response .narrative-section :deep(code) {
+  background: var(--color-bg-tertiary);
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  font-size: 0.9em;
+}
+
+.preserved-response .tools-section,
+.preserved-response .code-changes-section,
+.preserved-response .file-references {
+  margin-top: 0.5rem;
+}
+
+.preserved-response .response-metadata {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  margin-top: 0.5rem;
+}
+
+.preserved-response h3 {
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.5rem;
 }
 
 /* Responsive adjustments */

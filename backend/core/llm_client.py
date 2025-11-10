@@ -235,7 +235,7 @@ class LLMClient:
     
     async def stream_with_tools(self, messages: list[dict], tools: list[dict], max_tokens: int = 4096, 
                          temperature: float = 0.2, model: str | None = None, 
-                         timeout: int = 300) -> AsyncIterator[Dict[str, Any]]:
+                         timeout: int = 300, tool_choice: dict | None = None) -> AsyncIterator[Dict[str, Any]]:
         """
         Async stream with tool calling support (24-36x faster than sync).
         
@@ -244,6 +244,10 @@ class LLMClient:
         - First request: <5s (was 120-180s)
         - Subsequent requests: <2s (was 120-180s)
         - Non-blocking I/O enables concurrent requests
+        
+        TOOL CHOICE FORCING:
+        - tool_choice parameter can force specific tool usage
+        - Useful for ensuring write operations after analysis phase
         
         Yields event dictionaries with structure:
         {
@@ -278,6 +282,10 @@ class LLMClient:
                 "tools": tools,
                 "stream": True
             }
+            
+            # Add tool_choice if specified (forces Claude to use specific tools)
+            if tool_choice:
+                payload["tool_choice"] = tool_choice
             
             # Stream using async httpx
             async with httpx.AsyncClient(

@@ -329,6 +329,14 @@ function openFile(filePath: string) {
 defineExpose({
   handleEvent,
   getNarrative: () => narrative.value,
+  getAllData: () => ({
+    narrative: narrative.value,
+    tools: tools.value,
+    codeChanges: codeChanges.value,
+    fileReferences: fileReferences.value,
+    metadata: metadata.value,
+    error: error.value
+  }),
   clear: () => {
     narrative.value = '';
     metadata.value = null;
