@@ -15,12 +15,12 @@
       ref="narrativeContentRef"
     ></div>
 
-    <!-- Tool executions tree - DISABLED: User doesn't want to see "Tool Uitvoeringen" updates -->
-    <!-- <ToolExecutionTree 
+    <!-- Tool executions tree -->
+    <ToolExecutionTree 
       v-if="tools.length > 0"
       :tools="tools"
       class="tools-section"
-    /> -->
+    />
 
     <!-- Code changes viewer -->
     <div v-if="codeChanges.length > 0" class="code-changes-section">

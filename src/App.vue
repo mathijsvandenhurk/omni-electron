@@ -50,12 +50,7 @@
           class="chat-panel"
           :style="{ width: chatPanel.size.value + 'px' }"
         >
-          <Suspense>
-            <ChatPanel />
-            <template #fallback>
-              <div class="loading-placeholder">Loading chat...</div>
-            </template>
-          </Suspense>
+          <ChatPanel />
         </div>
         
         <!-- Resize Handle for Chat -->

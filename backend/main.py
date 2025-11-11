@@ -535,9 +535,10 @@ class OmniBackend:
             ]
             
             # Stream LLM response with tool calling
-            # ADAPTIVE ITERATION LIMIT: Start with 5, extend dynamically if making progress
-            max_iterations = 5
-            max_extended_iterations = 12  # Safety ceiling (lowered from 15 to avoid rate limits)
+            # ADAPTIVE ITERATION LIMIT: Lowered to reduce API calls and rate limit pressure
+            # Most tasks complete in 2-3 iterations with good prompting
+            max_iterations = 3  # Reduced from 5 (Step 4: rate limit optimization)
+            max_extended_iterations = 6  # Reduced from 12 (safety ceiling)
             iteration = 0
             accumulated_text = ""
             write_tools_executed = set()  # Track if any write operations were performed
@@ -548,7 +549,8 @@ class OmniBackend:
                 logger.info(f"[Streaming] Iteration {iteration}/{max_iterations}")
                 
                 # EARLY EXIT: If write operations were done and model responds without tools, we're done
-                if iteration > 3 and write_tools_executed and not accumulated_text.endswith('...'):
+                # Reduced threshold from 3 to 2 to exit faster (Step 4: rate limit optimization)
+                if iteration > 2 and write_tools_executed and not accumulated_text.endswith('...'):
                     logger.info(f"[Early exit] Write operations completed, stopping at iteration {iteration}")
                     break
                 
@@ -600,13 +602,16 @@ class OmniBackend:
                         raise Exception(error_msg)
                     
                     try:
-                        # Attempt LLM streaming
+                        # Attempt LLM streaming WITH PROMPT CACHING
+                        # System prompt and tools are cached for 5 minutes
+                        # This reduces tokens counting towards rate limits by ~90%!
                         async for event in self.llm.stream_with_tools(
                             messages=messages,
                             tools=tools,
                             max_tokens=4096,
                             temperature=0.7,
-                            timeout=300
+                            timeout=300,
+                            system_prompt=system_prompt  # Enable prompt caching!
                         ):
                             event_type = event.get('event_type', '')
                         
@@ -826,20 +831,22 @@ class OmniBackend:
                     "content": tool_results
                 })
                 
-                # EARLY EXIT CONDITION: If we've done write operations and we're past iteration 4, check if we should stop
+                # EARLY EXIT CONDITION: If we've done write operations and we're past iteration 3, check if we should stop
                 # This prevents over-optimization (continuing to make small tweaks after task is complete)
-                if iteration >= 4 and write_tools_executed:
+                # Reduced threshold from 4 to 3 (Step 4: rate limit optimization)
+                if iteration >= 3 and write_tools_executed:
                     logger.info(f"[Early exit check] {len(write_tools_executed)} write tool(s) executed. Giving model one more chance to confirm completion...")
                     # Let the model respond one more time to confirm completion or do final touches
                     # If it doesn't use tools, the "No tools called" check above will stop the loop
                 
                 # ADAPTIVE ITERATION EXTENSION: After adding tool results, check if we should extend
                 # Pattern: Many reads followed by writes = analysis → implementation workflow
+                # Reduced extension amount from 5 to 2 (Step 4: rate limit optimization)
                 if iteration == max_iterations - 1 and max_iterations < max_extended_iterations:
                     # Check if we're in "analysis phase" (many reads, no writes yet)
                     if read_tool_count >= 2 and not write_tools_executed:
-                        logger.warning(f"[Adaptive] Detected analysis-only pattern ({read_tool_count} reads, 0 writes). Extending iterations by 5.")
-                        max_iterations += 5
+                        logger.warning(f"[Adaptive] Detected analysis-only pattern ({read_tool_count} reads, 0 writes). Extending iterations by 2.")
+                        max_iterations += 2  # Reduced from 5
                         max_iterations = min(max_iterations, max_extended_iterations)  # Cap at safety limit
                         
                         # Inject guidance AFTER tool results (as separate user message)
