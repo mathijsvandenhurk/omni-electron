@@ -1,4 +1,5 @@
 import os
+import sys
 import requests
 import json
 import asyncio
@@ -235,7 +236,8 @@ class LLMClient:
     
     async def stream_with_tools(self, messages: list[dict], tools: list[dict], max_tokens: int = 4096, 
                          temperature: float = 0.2, model: str | None = None, 
-                         timeout: int = 300, tool_choice: dict | None = None) -> AsyncIterator[Dict[str, Any]]:
+                         timeout: int = 300, tool_choice: dict | None = None,
+                         system_prompt: str | None = None) -> AsyncIterator[Dict[str, Any]]:
         """
         Async stream with tool calling support (24-36x faster than sync).
         
@@ -248,6 +250,11 @@ class LLMClient:
         TOOL CHOICE FORCING:
         - tool_choice parameter can force specific tool usage
         - Useful for ensuring write operations after analysis phase
+        
+        PROMPT CACHING:
+        - System prompt and tool definitions are cached
+        - 90% reduction in tokens counting towards rate limits
+        - Cached content refreshed automatically on each use
         
         Yields event dictionaries with structure:
         {
@@ -274,14 +281,40 @@ class LLMClient:
                 "x-api-key": self.api_key,
                 "anthropic-version": "2023-06-01"
             }
+            
+            # PROMPT CACHING: Add cache control to system prompt and tools
+            # This reduces tokens counting towards rate limits by ~90%!
+            # See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+            system_blocks = []
+            if system_prompt:
+                system_blocks.append({
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"}  # Cache for 5 minutes
+                })
+            
+            # Cache tool definitions (they rarely change)
+            # Add cache_control to the LAST tool for optimal caching
+            cached_tools = []
+            for i, tool in enumerate(tools):
+                tool_copy = tool.copy()
+                # Only cache the last tool definition
+                if i == len(tools) - 1:
+                    tool_copy["cache_control"] = {"type": "ephemeral"}
+                cached_tools.append(tool_copy)
+            
             payload = {
                 "model": use_model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "messages": messages,
-                "tools": tools,
+                "tools": cached_tools,  # Use cached tools
                 "stream": True
             }
+            
+            # Add system prompt with caching if provided
+            if system_blocks:
+                payload["system"] = system_blocks
             
             # Add tool_choice if specified (forces Claude to use specific tools)
             if tool_choice:
@@ -299,6 +332,15 @@ class LLMClient:
                 async with client.stream('POST', url, json=payload, headers=headers) as response:
                     response.raise_for_status()
                     
+                    # Log cache usage from headers (for monitoring)
+                    if hasattr(response, 'headers'):
+                        remaining_requests = response.headers.get('anthropic-ratelimit-requests-remaining')
+                        remaining_tokens = response.headers.get('anthropic-ratelimit-input-tokens-remaining')
+                        if remaining_requests:
+                            print(f"[Rate Limits] Requests remaining: {remaining_requests}/50", file=sys.stderr)
+                        if remaining_tokens:
+                            print(f"[Rate Limits] Input tokens remaining: {remaining_tokens}/30000", file=sys.stderr)
+                    
                     # Parse SSE stream (same logic as sync version)
                     current_event_type = 'unknown'
                     async for line in response.aiter_lines():
@@ -314,6 +356,17 @@ class LLMClient:
                                 if data_json:
                                     event_data = json.loads(data_json)
                                     event_data['event_type'] = current_event_type
+                                    
+                                    # Log cache statistics when available
+                                    if current_event_type == 'message_start' and 'message' in event_data:
+                                        usage = event_data['message'].get('usage', {})
+                                        cache_read = usage.get('cache_read_input_tokens', 0)
+                                        cache_creation = usage.get('cache_creation_input_tokens', 0)
+                                        if cache_read > 0:
+                                            print(f"[Prompt Caching] ✅ Cache HIT! Read {cache_read} tokens from cache", file=sys.stderr)
+                                        if cache_creation > 0:
+                                            print(f"[Prompt Caching] 📝 Created cache with {cache_creation} tokens", file=sys.stderr)
+                                    
                                     yield event_data
                             except json.JSONDecodeError:
                                 continue

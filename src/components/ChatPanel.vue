@@ -45,7 +45,7 @@
         
         <!-- Tool messages: display with ToolMessage component -->
         <template v-else-if="msg.role === 'tool'">
-          <ToolMessage 
+          <ToolMessageComponent 
             :tool-name="msg.toolName"
             :tool-args="msg.toolArgs"
             :status="msg.status"
@@ -62,12 +62,12 @@
               <div class="message-header">
                 <strong>Omni</strong>
                 <span class="timestamp">{{ formatTime(msg.timestamp) }}</span>
-                <span v-if="msg.isStreaming" class="streaming-badge">Streaming...</span>
+                <span v-if="msg.state.isStreaming" class="streaming-badge">Streaming...</span>
               </div>
               
               <!-- Use StreamingResponse for actively streaming messages -->
               <StreamingResponse
-                v-if="msg.requestId && msg.isStreaming"
+                v-if="msg.requestId && msg.state.isStreaming"
                 :ref="el => registerStreamingRef(el, msg.requestId!)"
                 :request-id="msg.requestId"
                 :auto-scroll="true"
@@ -76,23 +76,17 @@
               />
               
               <!-- For completed messages, show preserved data -->
-              <div v-else-if="msg.tools || msg.codeChanges || msg.fileReferences || msg.metadata" class="message-content preserved-response">
+              <div v-else-if="msg.structuredContent.narrative || msg.structuredContent.tools || msg.structuredContent.codeChanges || msg.structuredContent.fileReferences || msg.structuredContent.metadata" class="message-content preserved-response">
                 <!-- Narrative content -->
-                <div v-if="msg.content" class="narrative-section" v-html="renderMarkdown(msg.content)"></div>
+                <div v-if="msg.structuredContent.narrative" class="narrative-section" v-html="renderMarkdown(msg.structuredContent.narrative)"></div>
                 
-                <!-- Tools section -->
-                <ToolExecutionTree 
-                  v-if="msg.tools && msg.tools.length > 0"
-                  :tools="msg.tools"
-                  :default-expanded="true"
-                  class="tools-section"
-                />
+
                 
                 <!-- Code changes -->
-                <div v-if="msg.codeChanges && msg.codeChanges.length > 0" class="code-changes-section">
+                <div v-if="msg.structuredContent.codeChanges && msg.structuredContent.codeChanges.length > 0" class="code-changes-section">
                   <h3>Code wijzigingen</h3>
                   <CodeChangeViewer 
-                    v-for="(change, idx) in msg.codeChanges"
+                    v-for="(change, idx) in msg.structuredContent.codeChanges"
                     :key="`code-${idx}`"
                     :file-path="change.file"
                     :code="change.code"
@@ -102,25 +96,22 @@
                 </div>
                 
                 <!-- File references -->
-                <div v-if="msg.fileReferences && msg.fileReferences.length > 0" class="file-references">
+                <div v-if="msg.structuredContent.fileReferences && msg.structuredContent.fileReferences.length > 0" class="file-references">
                   <h3>Bestanden</h3>
                   <FileReference 
-                    v-for="(ref, idx) in msg.fileReferences"
+                    v-for="(ref, idx) in msg.structuredContent.fileReferences"
                     :key="`ref-${idx}`"
                     :path="ref.path"
                   />
                 </div>
                 
                 <!-- Metadata footer -->
-                <div v-if="msg.metadata" class="response-metadata">
-                  <span v-if="msg.metadata.duration" class="duration">
-                    Duur: {{ formatDuration(msg.metadata.duration) }}
+                <div v-if="msg.structuredContent.metadata" class="response-metadata">
+                  <span v-if="msg.structuredContent.metadata.duration" class="duration">
+                    Duur: {{ formatDuration(msg.structuredContent.metadata.duration) }}
                   </span>
-                  <span v-if="msg.metadata.toolsExecuted && msg.metadata.toolsExecuted.length > 0" class="tools-count">
-                    Tools: {{ msg.metadata.toolsExecuted.length }}
-                  </span>
-                  <span v-if="msg.metadata.filesModified && msg.metadata.filesModified.length > 0" class="files-count">
-                    Bestanden: {{ msg.metadata.filesModified.length }}
+                  <span v-if="msg.structuredContent.metadata.filesModified && msg.structuredContent.metadata.filesModified.length > 0" class="files-count">
+                    Bestanden: {{ msg.structuredContent.metadata.filesModified.length }}
                   </span>
                 </div>
               </div>
@@ -128,7 +119,7 @@
               <!-- Fallback: Old-style content display for backwards compatibility -->
               <div v-else class="message-content">
                 <!-- Parse content for file references -->
-                <template v-for="(part, i) in parseMessageContent(msg.content)" :key="i">
+                <template v-for="(part, i) in parseMessageContent(msg.structuredContent.narrative || msg.content)" :key="i">
                   <FileReference v-if="part.type === 'file'" :path="part.value" />
                   <span v-else>{{ part.value }}</span>
                 </template>
@@ -138,35 +129,7 @@
         </template>
       </div>
 
-      <div v-if="loading" class="message assistant loading">
-        <div class="message-wrapper">
-          <div class="message-icon">🤖</div>
-          <div style="flex: 1;">
-            <div class="message-header">
-              <strong>Omni</strong>
-              <span class="activity-indicator">
-                <span class="spinner-dot"></span>
-                <span class="activity-text">Bezig...</span>
-              </span>
-            </div>
-            <div class="message-content">
-              <!-- Progress messages with spinner -->
-              <div v-if="currentProgress.length > 0" class="progress-section">
-                <div v-for="(prog, idx) in currentProgress" :key="idx" class="progress-item">
-                  <span class="progress-icon">{{ prog.icon }}</span>
-                  <span class="progress-text">{{ prog.text }}</span>
-                </div>
-              </div>
-              <!-- Typing indicator only when no progress -->
-              <span v-else class="typing-indicator">
-                <span></span>
-                <span></span>
-                <span></span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
+
     </div>
 
     <div class="input-area">
@@ -218,67 +181,63 @@ import FileReference from './FileReference.vue';
 import StreamingResponse from './StreamingResponse.vue';
 import ToolExecutionTree from './ToolExecutionTree.vue';
 import CodeChangeViewer from './CodeChangeViewer.vue';
-import ToolMessage from './ToolMessage.vue';
+import ToolMessageComponent from './ToolMessage.vue';
 import type { OmniEvent } from '../types/events';
+import type { 
+  OmniMessage, 
+  UserMessage as UserMsg,
+  AssistantMessage as AssistantMsg,
+  ToolMessage as ToolMsg 
+} from '../types/messages';
+import { messageStorage } from '../services/messageStorage';
 
-// Base message types
-type UserMessage = {
-  role: 'user';
-  content: string;
-  timestamp: Date;
-};
+// Helper function to generate unique IDs
+function generateId(): string {
+  return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
 
-type AssistantMessage = {
-  role: 'assistant';
-  content: string;
-  timestamp: Date;
-  requestId?: string;
-  isStreaming?: boolean;
-  // Preserved data for completed messages (legacy support)
-  tools?: Array<{
-    name: string;
-    args: any;
-    result?: any;
-    status: 'pending' | 'running' | 'success' | 'error';
-    startTime: number;
-    duration?: number;
-    error?: string;
-  }>;
-  codeChanges?: Array<{
-    file: string;
-    lineStart: number;
-    lineEnd: number;
-    code: string;
-    language: string;
-  }>;
-  fileReferences?: Array<{
-    path: string;
-    lineStart?: number;
-    lineEnd?: number;
-    context?: string;
-  }>;
-  metadata?: {
-    requestId: string;
-    duration: number;
-    tokensUsed: number;
-    toolsExecuted: string[];
-    filesModified: string[];
+// Helper functions to create properly structured messages
+function createUserMessage(content: string, requestId?: string): UserMsg {
+  return {
+    role: 'user',
+    id: generateId(),
+    content,
+    timestamp: new Date(),
+    requestId
   };
-};
+}
 
-type ToolMessage = {
-  role: 'tool';
-  toolName: string;
-  toolArgs?: Record<string, any>;
-  status: 'calling' | 'done' | 'error';
-  result?: any;
-  duration?: number;
-  error?: string;
-  timestamp: Date;
-  requestId: string;
-};
+function createAssistantMessage(narrative: string = '', requestId?: string, isStreaming: boolean = false): AssistantMsg {
+  return {
+    role: 'assistant',
+    id: generateId(),
+    content: '', // Content is in structuredContent
+    structuredContent: {
+      narrative,
+      tools: [],
+      codeChanges: [],
+      fileReferences: [],
+      metadata: {
+        duration: 0,
+        model: 'omni',
+        filesModified: [],
+        testsRun: false
+      }
+    },
+    state: {
+      isStreaming,
+      isComplete: !isStreaming,
+      hasError: false
+    },
+    timestamp: new Date(),
+    requestId
+  };
+}
 
-type Message = UserMessage | AssistantMessage | ToolMessage;
+// Type aliases for component use
+type Message = OmniMessage;
+type AssistantMessage = AssistantMsg;
+type ToolMessage = ToolMsg;
 
 // Load messages from persistent storage on component creation
 const loadMessages = async (): Promise<Message[]> => {
@@ -339,9 +298,27 @@ const loadMessages = async (): Promise<Message[]> => {
   // Default welcome message (only if no messages AND no archived messages)
   return [{
     role: 'assistant',
-    content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
+    id: generateId(),
+    content: '',  // Content is in structuredContent.narrative
+    structuredContent: {
+      narrative: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
+      tools: [],
+      codeChanges: [],
+      fileReferences: [],
+      metadata: {
+        duration: 0,
+        model: 'omni',
+        filesModified: [],
+        testsRun: false
+      }
+    },
+    state: {
+      isStreaming: false,
+      isComplete: true,
+      hasError: false
+    },
     timestamp: new Date()
-  }];
+  } as AssistantMsg];
 };
 
 const messages = ref<Message[]>([]);
@@ -464,6 +441,18 @@ if ((import.meta as any).hot) {
 
 // Load messages and archived messages on mount
 onMounted(async () => {
+  console.log('═══════════════════════════════════════════════════════');
+  console.log('[ChatPanel] 🚀 Initializing with NEW persistence layer');
+  console.log('═══════════════════════════════════════════════════════');
+  
+  // Initialize IndexedDB storage
+  try {
+    await messageStorage.init();
+    console.log('[ChatPanel] ✅ MessageStorage (IndexedDB) initialized successfully');
+  } catch (error) {
+    console.error('[ChatPanel] ❌ Failed to init messageStorage:', error);
+  }
+  
   // Clean up any existing listeners first (important for HMR)
   if (window.electronAPI?.removeChatEventListener) {
     window.electronAPI.removeChatEventListener();
@@ -472,12 +461,65 @@ onMounted(async () => {
   // Setup streaming event listener
   setupStreamingListener();
   
-  // Load messages from persistent storage
-  const loadedMessages = await loadMessages();
-  // Use splice to maintain array reference for Vue reactivity
-  messages.value.splice(0, messages.value.length, ...loadedMessages);
+  // Load messages from NEW persistent storage (IndexedDB + localStorage fallback)
+  try {
+    const loadedMessages = await messageStorage.loadRecentMessages(50); // Load last 50 messages
+    console.log(`[ChatPanel] 📥 Loaded ${loadedMessages.length} messages from IndexedDB`);
+    
+    if (loadedMessages.length > 0) {
+      // Log message types for debugging
+      const msgTypes = loadedMessages.map(m => m.role).join(', ');
+      console.log(`[ChatPanel] 📝 Message types: ${msgTypes}`);
+      
+      // FIX: Reset streaming state for all loaded messages
+      // Loaded messages should never be in streaming state
+      loadedMessages.forEach(msg => {
+        if (msg.role === 'assistant') {
+          msg.state.isStreaming = false;
+          msg.state.isComplete = true;
+        }
+        // FIX: Tool messages loaded from storage should have correct status
+        // If they have a result or error, they're done/error, not 'calling'
+        if (msg.role === 'tool' && msg.status === 'calling') {
+          if (msg.error) {
+            msg.status = 'error';
+          } else if (msg.result !== undefined) {
+            msg.status = 'done';
+          }
+          // else: keep 'calling' if truly incomplete (rare case)
+        }
+      });
+      console.log('[ChatPanel] 🔧 Reset streaming/tool states for loaded messages');
+      
+      // Check for structured content
+      const assistantMsgs = loadedMessages.filter(m => m.role === 'assistant');
+      if (assistantMsgs.length > 0) {
+        const lastAssistant = assistantMsgs[assistantMsgs.length - 1] as AssistantMsg;
+        console.log('[ChatPanel] 🔍 Last assistant message has:');
+        console.log(`  - Narrative length: ${lastAssistant.structuredContent.narrative.length}`);
+        console.log(`  - Tools: ${lastAssistant.structuredContent.tools.length}`);
+        console.log(`  - Code changes: ${lastAssistant.structuredContent.codeChanges.length}`);
+        console.log(`  - File refs: ${lastAssistant.structuredContent.fileReferences.length}`);
+      }
+      
+      // Use splice to maintain array reference for Vue reactivity
+      messages.value.splice(0, messages.value.length, ...loadedMessages);
+      console.log('[ChatPanel] ✅ Messages restored to chat');
+    } else {
+      console.log('[ChatPanel] 📭 No messages in storage, loading default welcome');
+      // No messages loaded, use default welcome message
+      const loadedMessages = await loadMessages();
+      messages.value.splice(0, messages.value.length, ...loadedMessages);
+    }
+  } catch (error) {
+    console.error('[ChatPanel] ❌ Failed to load messages from IndexedDB:', error);
+    console.log('[ChatPanel] 🔄 Falling back to old localStorage method');
+    // Fallback to old localStorage method
+    const loadedMessages = await loadMessages();
+    messages.value.splice(0, messages.value.length, ...loadedMessages);
+  }
   
-  // Load archived messages
+  // Load archived messages (still using old method for now)
   loadArchivedMessages();
   
   // If we have archived messages but no visible messages, load the most recent 10
@@ -562,66 +604,59 @@ const saveCommandHistory = (history: string[]) => {
 
 // Initialize command history
 commandHistory.value = loadCommandHistory();
+// Track which messages have been saved to prevent duplicate saves
+const savedMessageIds = new Set<string>();
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
-// Watch messages and auto-save to both localStorage AND persistent storage whenever they change
+// Watch messages and auto-save to BOTH old localStorage AND new IndexedDB storage
+// Using debounce to prevent excessive save operations
 watch(messages, async (newMessages) => {
-  try {
-    // Convert messages to plain objects (serialize Date objects to strings)
-    // Persist ALL message types including tools
-    // SKIP streaming messages (not yet complete)
-    const serializedMessages = newMessages
-      .filter(msg => {
-        // Skip assistant messages that are still streaming
-        if (msg.role === 'assistant' && msg.isStreaming) {
-          return false;
-        }
-        return true;
-      })
-      .map(msg => {
-        if (msg.role === 'tool') {
-          // Deep clone to avoid circular references and convert to JSON-safe format
-          const safeArgs = msg.toolArgs ? JSON.parse(JSON.stringify(msg.toolArgs)) : undefined;
-          const safeResult = msg.result ? JSON.parse(JSON.stringify(msg.result)) : undefined;
-          
-          return {
-            role: msg.role,
-            toolName: msg.toolName,
-            toolArgs: safeArgs,
-            status: msg.status,
-            result: safeResult,
-            duration: msg.duration,
-            error: msg.error,
-            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp,
-            requestId: msg.requestId
-          };
-        } else if (msg.role === 'assistant') {
-          return {
-            role: msg.role,
-            content: msg.content,
-            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp,
-            requestId: msg.requestId,
-            // Don't save isStreaming - always false when loaded
-            // Skip tools/codeChanges/etc for now - only save content
-          };
-        } else {
-          return {
-            role: msg.role,
-            content: msg.content,
-            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp
-          };
-        }
-      });
-    
-    // Save to localStorage for quick access
-    localStorage.setItem('omni-chat-messages', JSON.stringify(serializedMessages));
-    
-    // Save to persistent storage (survives app restarts)
-    if (window.electronAPI && window.electronAPI.saveChatMessages) {
-      await window.electronAPI.saveChatMessages(serializedMessages);
-    }
-  } catch (error) {
-    console.warn('Failed to save messages:', error);
+  // Clear existing timeout
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
   }
+  
+  // Debounce: wait 500ms after last change before saving
+  saveTimeout = setTimeout(async () => {
+    try {
+      // Save completed messages to NEW persistent storage (IndexedDB)
+      let savedCount = 0;
+      let skippedStreaming = 0;
+      let skippedAlreadySaved = 0;
+      
+      for (const msg of newMessages) {
+        // Skip streaming messages (not yet complete)
+        if (msg.role === 'assistant' && msg.state.isStreaming) {
+          skippedStreaming++;
+          continue;
+        }
+        
+        // Skip if already saved
+        if (savedMessageIds.has(msg.id)) {
+          skippedAlreadySaved++;
+          continue;
+        }
+        
+        // Save to IndexedDB via messageStorage
+        try {
+          await messageStorage.saveMessage(msg);
+          savedMessageIds.add(msg.id); // Mark as saved
+          savedCount++;
+        } catch (error) {
+          console.warn('[ChatPanel] ⚠️ Failed to save message to IndexedDB:', msg.role, error);
+        }
+      }
+      
+      if (savedCount > 0) {
+        console.log(`[ChatPanel] 💾 Auto-saved ${savedCount} new messages (skipped ${skippedStreaming} streaming, ${skippedAlreadySaved} already saved)`);
+      }
+      
+      // Note: OLD localStorage save removed - now using messageStorage.saveMessage() above
+      // which properly sanitizes data before storage to prevent "object could not be cloned" errors
+    } catch (error) {
+      console.warn('Failed to save messages:', error);
+    }
+  }, 500); // 500ms debounce
 }, { deep: true });
 
 // Add command to history
@@ -753,11 +788,7 @@ const sendMessage = async () => {
   addToHistory(message);
 
   // Add user message
-  messages.value.push({
-    role: 'user',
-    content: message,
-    timestamp: new Date()
-  });
+  messages.value.push(createUserMessage(message));
 
   inputMessage.value = '';
   loading.value = true;
@@ -780,13 +811,7 @@ const sendMessage = async () => {
 
   // Add placeholder for assistant message with streaming support
   const assistantMessageIndex = messages.value.length;
-  messages.value.push({
-    role: 'assistant',
-    content: '',
-    timestamp: new Date(),
-    requestId: requestId,
-    isStreaming: true
-  });
+  messages.value.push(createAssistantMessage('', requestId, true));
 
   try {
     // Call backend - streaming events will be handled by onChatEvent listener
@@ -798,8 +823,10 @@ const sendMessage = async () => {
       console.error('[ChatPanel] Chat error:', response.error);
       const lastMsg = messages.value[assistantMessageIndex];
       if (lastMsg.role === 'assistant') {
-        lastMsg.content = `Error: ${response.error || 'Unknown error'}`;
-        lastMsg.isStreaming = false;
+        lastMsg.structuredContent.narrative = `Error: ${response.error || 'Unknown error'}`;
+        lastMsg.state.isStreaming = false;
+        lastMsg.state.hasError = true;
+        lastMsg.state.errorMessage = response.error || 'Unknown error';
       }
       loading.value = false;
     }
@@ -810,8 +837,10 @@ const sendMessage = async () => {
     // Handle exception
     const lastMsg = messages.value[assistantMessageIndex];
     if (lastMsg.role === 'assistant') {
-      lastMsg.content = `Error: ${error?.message || 'Unknown error'}`;
-      lastMsg.isStreaming = false;
+      lastMsg.structuredContent.narrative = `Error: ${error?.message || 'Unknown error'}`;
+      lastMsg.state.isStreaming = false;
+      lastMsg.state.hasError = true;
+      lastMsg.state.errorMessage = error?.message || 'Unknown error';
     }
     loading.value = false;
   }
@@ -822,29 +851,55 @@ const sendMessage = async () => {
 };
 
 // Streaming event handlers
-const handleStreamComplete = (requestId: string) => {
+const handleStreamComplete = async (requestId: string) => {
+  console.log('[ChatPanel] ✅ Stream complete for request:', requestId);
+  
   // Find message and mark as complete
   const message = messages.value.find((m): m is AssistantMessage | ToolMessage => 
     (m.role === 'assistant' || m.role === 'tool') && m.requestId === requestId
   );
   
   if (message && message.role === 'assistant') {
-    message.isStreaming = false;
+    message.state.isStreaming = false;
+    message.state.isComplete = true;
     
     // Get ALL data from StreamingResponse and save it to the message
     const responseRef = streamingResponseRefs.value[requestId];
     if (responseRef && responseRef.getAllData) {
       const allData = responseRef.getAllData();
       
-      // Save all the data to the message for persistence
-      message.content = allData.narrative || '';
-      message.tools = allData.tools;
-      message.codeChanges = allData.codeChanges;
-      message.fileReferences = allData.fileReferences;
-      message.metadata = allData.metadata;
+      console.log('[ChatPanel] 📦 Collecting streamed data:');
+      console.log(`  - Narrative: ${(allData.narrative || '').length} chars`);
+      console.log(`  - Tools: ${(allData.tools || []).length}`);
+      console.log(`  - Code changes: ${(allData.codeChanges || []).length}`);
+      console.log(`  - File refs: ${(allData.fileReferences || []).length}`);
       
-      // Watcher will automatically save messages when content changes
+      // Save all the data to the message for persistence
+      message.structuredContent.narrative = allData.narrative || '';
+      message.structuredContent.tools = allData.tools || [];
+      message.structuredContent.codeChanges = allData.codeChanges || [];
+      message.structuredContent.fileReferences = allData.fileReferences || [];
+      message.structuredContent.metadata = allData.metadata || {
+        duration: 0,
+        model: 'omni',
+        filesModified: [],
+        testsRun: false
+      };
+      
+      // IMPORTANT: Save to persistence immediately
+      try {
+        await messageStorage.saveMessage(message);
+        console.log('[ChatPanel] 💾✨ Message saved to IndexedDB after stream complete');
+      } catch (error) {
+        console.error('[ChatPanel] ❌ Failed to save completed message:', error);
+      }
+      
+      // Watcher will also save to localStorage as backup
+    } else {
+      console.warn('[ChatPanel] ⚠️ No StreamingResponse ref or getAllData for:', requestId);
     }
+  } else {
+    console.warn('[ChatPanel] ⚠️ No assistant message found for request:', requestId);
   }
   
   loading.value = false;
@@ -852,8 +907,9 @@ const handleStreamComplete = (requestId: string) => {
   scrollToBottom();
 };
 
-const handleStreamError = (error: any) => {
-  console.error('[ChatPanel] Stream error:', error);
+const handleStreamError = async (error: any) => {
+  console.error('[ChatPanel] ❌ Stream error:', error);
+  console.log('[ChatPanel] 🚨 EMERGENCY: Preserving partial data before crash...');
   
   // CRITICAL: Preserve data before marking as complete
   // Find the message that was streaming
@@ -865,15 +921,46 @@ const handleStreamError = (error: any) => {
       const allData = responseRef.getAllData();
       
       // Save all the data to the message for persistence
-      lastMsg.content = allData.narrative || '';
-      lastMsg.tools = allData.tools;
-      lastMsg.codeChanges = allData.codeChanges;
-      lastMsg.fileReferences = allData.fileReferences;
-      lastMsg.metadata = allData.metadata;
+      lastMsg.structuredContent.narrative = allData.narrative || '';
+      lastMsg.structuredContent.tools = allData.tools || [];
+      lastMsg.structuredContent.codeChanges = allData.codeChanges || [];
+      lastMsg.structuredContent.fileReferences = allData.fileReferences || [];
+      lastMsg.structuredContent.metadata = allData.metadata || {
+        duration: 0,
+        model: 'omni',
+        filesModified: [],
+        testsRun: false
+      };
     }
     
-    // NOW mark as complete
-    lastMsg.isStreaming = false;
+    // NOW mark as complete with error
+    lastMsg.state.isStreaming = false;
+    lastMsg.state.isComplete = true;
+    lastMsg.state.hasError = true;
+    lastMsg.state.errorMessage = error?.message || 'Stream error';
+    
+    // EMERGENCY SAVE: Even on error, preserve what we have
+    try {
+      await messageStorage.saveMessage(lastMsg);
+      console.log('[ChatPanel] 🆘💾 EMERGENCY SAVE successful - message preserved in IndexedDB');
+      console.log(`[ChatPanel]   - Saved ${lastMsg.structuredContent.narrative.length} chars of narrative`);
+      console.log(`[ChatPanel]   - Saved ${lastMsg.structuredContent.tools.length} tools`);
+    } catch (saveError) {
+      console.error('[ChatPanel] ❌❌ Failed to emergency save to IndexedDB:', saveError);
+      // Last resort: save to localStorage
+      try {
+        const emergencyBackup = JSON.parse(localStorage.getItem('omni-chat-emergency-backup') || '[]');
+        emergencyBackup.push({
+          ...lastMsg,
+          timestamp: lastMsg.timestamp.toISOString(),
+          savedAt: new Date().toISOString()
+        });
+        localStorage.setItem('omni-chat-emergency-backup', JSON.stringify(emergencyBackup));
+        console.log('[ChatPanel] 🆘📦 LAST RESORT: Emergency backup saved to localStorage');
+      } catch (backupError) {
+        console.error('[ChatPanel] ❌❌❌ CRITICAL: Even emergency backup failed:', backupError);
+      }
+    }
   }
   
   loading.value = false;
@@ -895,11 +982,21 @@ const setupStreamingListener = () => {
   if (window.electronAPI?.onChatEvent) {
     // Create new handler
     globalEventHandler = (event: OmniEvent) => {
-      // Intercept tool events to create separate tool messages
+      // Forward tool events to StreamingResponse for display in chat updates
       if (event.type === 'tool_start') {
-        // Create a new tool message in "calling" state
-        const toolMessage: ToolMessage = {
+        console.log('[ChatPanel] Tool started:', event.data.name);
+        
+        // Forward to StreamingResponse for display in chat updates
+        const responseRef = streamingResponseRefs.value[event.requestId];
+        if (responseRef && responseRef.handleEvent) {
+          responseRef.handleEvent(event);
+        }
+        
+        // Also create a separate tool message for detailed view
+        const toolMessage: ToolMsg = {
           role: 'tool',
+          id: generateId(),
+          content: '', // Will be populated when tool completes
           toolName: event.data.name,
           toolArgs: event.data.args,
           status: 'calling',
@@ -926,12 +1023,17 @@ const setupStreamingListener = () => {
           messages.value.push(toolMessage);
         }
         
-        console.log('[ChatPanel] Tool started:', event.data.name);
-        
-        // DON'T forward tool_start to StreamingResponse - we handle it here
         return;
       } else if (event.type === 'tool_result') {
-        // Find the corresponding tool message and update it
+        console.log('[ChatPanel] Tool completed:', event.data.name, event.data.status);
+        
+        // Forward to StreamingResponse for display in chat updates
+        const responseRef = streamingResponseRefs.value[event.requestId];
+        if (responseRef && responseRef.handleEvent) {
+          responseRef.handleEvent(event);
+        }
+        
+        // Also update the separate tool message
         const toolMsg = messages.value.find((m): m is ToolMessage => 
           m.role === 'tool' && 
           m.requestId === event.requestId && 
@@ -944,13 +1046,10 @@ const setupStreamingListener = () => {
           toolMsg.result = event.data.result;
           toolMsg.error = event.data.error;
           toolMsg.duration = event.data.duration;
-          
-          console.log('[ChatPanel] Tool completed:', event.data.name, toolMsg.status);
         } else {
           console.warn('[ChatPanel] No matching tool message found for tool_result:', event.data.name);
         }
         
-        // DON'T forward tool_result to StreamingResponse - we handle it here
         return;
       } else if (event.type === 'narrative_chunk') {
         // Check if last message is a tool - if so, create NEW assistant message
@@ -959,13 +1058,7 @@ const setupStreamingListener = () => {
         
         if (needsNewMessage) {
           // Create a new assistant message for text AFTER the tool
-          messages.value.push({
-            role: 'assistant',
-            content: '',
-            timestamp: new Date(),
-            requestId: event.requestId,
-            isStreaming: true
-          });
+          messages.value.push(createAssistantMessage('', event.requestId, true));
           console.log('[ChatPanel] Created new AssistantMessage after tool');
         }
         
@@ -1019,23 +1112,89 @@ const scrollToBottom = (force = false, instant = false) => {
   }
 };
 
-const abortRequest = () => {
+const abortRequest = async () => {
+  console.log('[ChatPanel] 🛑 Aborting current request...');
+  
+  // Stop the backend process if we have a current request ID
+  if (currentRequestId.value) {
+    try {
+      if (window.electronAPI && window.electronAPI.abortChat) {
+        console.log('[ChatPanel] 📞 Calling backend abort for request:', currentRequestId.value);
+        const result = await window.electronAPI.abortChat(currentRequestId.value);
+        if (result.success) {
+          console.log('[ChatPanel] ✅ Backend process successfully aborted');
+        } else {
+          console.warn('[ChatPanel] ⚠️ Backend abort failed:', result.error);
+        }
+      }
+    } catch (error) {
+      console.error('[ChatPanel] ❌ Error aborting backend process:', error);
+    }
+  }
+  
+  // Stop streaming for current request
+  if (currentRequestId.value && streamingResponseRefs.value[currentRequestId.value]) {
+    const streamingRef = streamingResponseRefs.value[currentRequestId.value];
+    if (streamingRef && streamingRef.abort) {
+      streamingRef.abort();
+    }
+  }
+  
   // Set loading to false to stop the current request
   loading.value = false;
   
-  // Add a system message indicating the request was stopped
+  // Clear progress indicators
+  currentProgress.value = [];
+  progressUpdates.value = [];
+  
+  // Find the last assistant message and mark it as stopped
   const lastMsg = messages.value[messages.value.length - 1];
   if (lastMsg && lastMsg.role === 'assistant') {
-    lastMsg.content += '\n\n⚠️ Request gestopt door gebruiker.';
+    // If it's streaming, preserve what we have and mark as stopped
+    if (lastMsg.state.isStreaming) {
+      // Get current data from StreamingResponse if available
+      if (currentRequestId.value && streamingResponseRefs.value[currentRequestId.value]) {
+        const responseRef = streamingResponseRefs.value[currentRequestId.value];
+        if (responseRef && responseRef.getAllData) {
+          const allData = responseRef.getAllData();
+          lastMsg.structuredContent.narrative = allData.narrative || '';
+          lastMsg.structuredContent.tools = allData.tools || [];
+          lastMsg.structuredContent.codeChanges = allData.codeChanges || [];
+          lastMsg.structuredContent.fileReferences = allData.fileReferences || [];
+        }
+      }
+      
+      // Mark as stopped
+      lastMsg.state.isStreaming = false;
+      lastMsg.state.isComplete = true;
+      lastMsg.state.wasStopped = true;
+      
+      // Add stop message to narrative
+      if (lastMsg.structuredContent.narrative && !lastMsg.structuredContent.narrative.endsWith('\n')) {
+        lastMsg.structuredContent.narrative += '\n';
+      }
+      lastMsg.structuredContent.narrative += '\n🛑 **Request gestopt door gebruiker**\n';
+      
+      // Save the partial result
+      try {
+        await messageStorage.saveMessage(lastMsg);
+        console.log('[ChatPanel] 💾 Partial message saved after stop');
+      } catch (error) {
+        console.warn('[ChatPanel] ⚠️ Failed to save stopped message:', error);
+      }
+    }
   }
+  
+  // Clear current request ID
+  currentRequestId.value = null;
+  
+  console.log('[ChatPanel] ✅ Request abort complete');
 };
 
 const clearChat = () => {
-  const welcomeMessage: Message = {
-    role: 'assistant',
-    content: 'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?',
-    timestamp: new Date()
-  };
+  const welcomeMessage = createAssistantMessage(
+    'Hallo! Ik ben Omni, jouw zelfverbeterende AI-assistent. Hoe kan ik je vandaag helpen?'
+  );
   // Use splice to maintain array reference for Vue reactivity
   messages.value.splice(0, messages.value.length, welcomeMessage);
   localStorage.removeItem('omni-chat-messages');
@@ -1053,11 +1212,9 @@ const inlineChatRef = ref();
 
 const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
   // Add user message to chat
-  const userMessage: Message = {
-    role: 'user',
-    content: selection ? `\`\`\`\n${selection}\n\`\`\`\n\n${prompt}` : prompt,
-    timestamp: new Date()
-  };
+  const userMessage = createUserMessage(
+    selection ? `\`\`\`\n${selection}\n\`\`\`\n\n${prompt}` : prompt
+  );
   messages.value.push(userMessage);
 
   // Trigger API call similar to sendMessage
@@ -1065,11 +1222,7 @@ const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
   
   // Add placeholder for assistant message
   const assistantMessageIndex = messages.value.length;
-  messages.value.push({
-    role: 'assistant',
-    content: '',
-    timestamp: new Date()
-  });
+  messages.value.push(createAssistantMessage());
 
   await nextTick();
   scrollToBottom();
@@ -1100,7 +1253,7 @@ const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
         await typewriterEffect(
           response.message,
           (partialText) => {
-            msg.content = partialText;
+            msg.structuredContent.narrative = partialText;
           }
         );
       }
@@ -1110,7 +1263,9 @@ const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
     } else {
       const msg = messages.value[assistantMessageIndex];
       if (msg.role === 'assistant') {
-        msg.content = `❌ Fout: ${response.error}`;
+        msg.structuredContent.narrative = `❌ Fout: ${response.error}`;
+        msg.state.hasError = true;
+        msg.state.errorMessage = response.error;
       }
     }
   } catch (error) {
@@ -1118,7 +1273,9 @@ const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const msg = messages.value[assistantMessageIndex];
     if (msg.role === 'assistant') {
-      msg.content = `❌ Fout: ${errorMessage}`;
+      msg.structuredContent.narrative = `❌ Fout: ${errorMessage}`;
+      msg.state.hasError = true;
+      msg.state.errorMessage = errorMessage;
     }
   } finally {
     loading.value = false;
@@ -1129,11 +1286,9 @@ const handleInlineChatApply = (changes: string) => {
   console.log('Inline chat apply:', changes);
   // Here you would integrate with editor/code application logic
   // For now, just add as a message
-  const message: Message = {
-    role: 'assistant',
-    content: `✅ Changes applied:\n\`\`\`\n${changes}\n\`\`\``,
-    timestamp: new Date()
-  };
+  const message = createAssistantMessage(
+    `✅ Changes applied:\n\`\`\`\n${changes}\n\`\`\``
+  );
   messages.value.push(message);
 };
 
@@ -1186,8 +1341,10 @@ const handleArrowDown = (event: KeyboardEvent) => {
   }
 };
 
-const formatTime = (date: Date) => {
-  return date.toLocaleTimeString('en-US', {
+const formatTime = (date: Date | string) => {
+  // Handle both Date objects and ISO string timestamps
+  const d = date instanceof Date ? date : new Date(date);
+  return d.toLocaleTimeString('en-US', {
     hour: '2-digit',
     minute: '2-digit'
   });
@@ -1434,8 +1591,8 @@ const parseMessageContent = (content: string): MessagePart[] => {
   flex: 1;
   min-width: 0; /* Allow flex child to shrink below content size */
   overflow: hidden; /* Constrain children */
-  margin-left: 35px; /* Align with icon + gap */
-  margin-right: 35px; /* Match right margin with left for symmetry */
+  margin-left: 0; /* Remove left margin - fully left aligned */
+  margin-right: 8px; /* Extra reduced right margin for maximum space */
 }
 
 .message.assistant .message-icon {
@@ -1787,6 +1944,61 @@ const parseMessageContent = (content: string): MessagePart[] => {
   font-size: 0.9rem;
   color: var(--color-text-secondary);
   margin-bottom: 0.5rem;
+}
+
+/* Play/Stop button styling - more subtle and blended */
+.play-stop-button {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.08);
+  color: rgba(59, 130, 246, 0.7);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.play-stop-button:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: rgba(59, 130, 246, 0.9);
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.15);
+}
+
+.play-stop-button:active {
+  transform: scale(0.98);
+}
+
+.play-stop-button.stop-mode {
+  background: rgba(239, 68, 68, 0.08);
+  color: rgba(239, 68, 68, 0.7);
+}
+
+.play-stop-button.stop-mode:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: rgba(239, 68, 68, 0.9);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.15);
+}
+
+.play-stop-button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  transform: none;
+  background: rgba(156, 163, 175, 0.05);
+  color: rgba(156, 163, 175, 0.5);
+}
+
+.play-stop-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* Responsive adjustments */

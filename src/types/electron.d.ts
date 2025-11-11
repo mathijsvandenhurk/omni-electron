@@ -4,6 +4,7 @@ import type { OmniEvent } from './events';
 
 export interface ElectronAPI {
   chat: (message: string, requestId?: string) => Promise<ChatResponse>;
+  abortChat: (requestId: string) => Promise<{ success: boolean; error?: string }>;
   listModels: () => Promise<ModelsResponse>;
   getStatus: () => Promise<StatusResponse>;
   listFiles: (path: string) => Promise<FilesResponse>;

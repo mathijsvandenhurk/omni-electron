@@ -310,7 +310,7 @@ const handleSelectionChange = (selection: string) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: var(--space-4) var(--space-6);
+  padding: var(--space-4) var(--space-2);
   background: var(--color-bg-secondary);
   border-bottom: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-sm);
