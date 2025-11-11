@@ -13,11 +13,11 @@ export interface ElectronAPI {
   saveChatMessages: (messages: any[]) => Promise<{ success: boolean; error?: string }>;
   loadChatMessages: () => Promise<{ success: boolean; data?: any[]; error?: string }>;
   onChatProgress: (callback: (message: string) => void) => void;
-  onChatEvent: (callback: (event: OmniEvent) => void) => void;  // New streaming API
+  onChatEvent: (callback: (event: OmniEvent) => void) => (() => void);  // Returns cleanup function
   onTerminalLog: (callback: (data: { type: string; message: string }) => void) => void;
   onOpenFile: (callback: (filePath: string) => void) => void;
   removeChatProgressListener: () => void;
-  removeChatEventListener: () => void;  // Cleanup for streaming listener
+  removeChatEventListener: () => void;  // Deprecated - use cleanup function from onChatEvent instead
   removeTerminalLogListener: () => void;
   platform: string;
 }

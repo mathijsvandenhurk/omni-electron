@@ -84,9 +84,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * Listen for streaming chat events (new streaming protocol)
    * @param {function} callback - Called with streaming event object
+   * @returns {function} - Cleanup function to remove the listener
    */
   onChatEvent: (callback) => {
-    ipcRenderer.on('chat:event', (event, eventData) => callback(eventData));
+    const handler = (event, eventData) => callback(eventData);
+    ipcRenderer.on('chat:event', handler);
+    // Return cleanup function
+    return () => ipcRenderer.removeListener('chat:event', handler);
   },
 
   /**

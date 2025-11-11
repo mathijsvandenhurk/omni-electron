@@ -43,11 +43,22 @@
           <div class="message-content">{{ msg.content }}</div>
         </template>
         
-        <!-- Assistant messages: icon + bubble on the left -->
-        <template v-else>
+        <!-- Tool messages: display with ToolMessage component -->
+        <template v-else-if="msg.role === 'tool'">
+          <ToolMessage 
+            :tool-name="msg.toolName"
+            :tool-args="msg.toolArgs"
+            :status="msg.status"
+            :result="msg.result"
+            :duration="msg.duration"
+            :error="msg.error"
+          />
+        </template>
+        
+        <!-- Assistant messages: bubble on the left -->
+        <template v-else-if="msg.role === 'assistant'">
           <div class="message-wrapper">
-            <div class="message-icon">🤖</div>
-            <div style="flex: 1;">
+            <div class="message-bubble-container">
               <div class="message-header">
                 <strong>Omni</strong>
                 <span class="timestamp">{{ formatTime(msg.timestamp) }}</span>
@@ -73,6 +84,7 @@
                 <ToolExecutionTree 
                   v-if="msg.tools && msg.tools.length > 0"
                   :tools="msg.tools"
+                  :default-expanded="true"
                   class="tools-section"
                 />
                 
@@ -206,15 +218,23 @@ import FileReference from './FileReference.vue';
 import StreamingResponse from './StreamingResponse.vue';
 import ToolExecutionTree from './ToolExecutionTree.vue';
 import CodeChangeViewer from './CodeChangeViewer.vue';
+import ToolMessage from './ToolMessage.vue';
 import type { OmniEvent } from '../types/events';
 
-interface Message {
-  role: 'user' | 'assistant';
+// Base message types
+type UserMessage = {
+  role: 'user';
   content: string;
   timestamp: Date;
-  requestId?: string;  // For tracking streaming responses
-  isStreaming?: boolean;  // Whether this message is still streaming
-  // Streaming response data (preserved after completion)
+};
+
+type AssistantMessage = {
+  role: 'assistant';
+  content: string;
+  timestamp: Date;
+  requestId?: string;
+  isStreaming?: boolean;
+  // Preserved data for completed messages (legacy support)
   tools?: Array<{
     name: string;
     args: any;
@@ -244,7 +264,21 @@ interface Message {
     toolsExecuted: string[];
     filesModified: string[];
   };
-}
+};
+
+type ToolMessage = {
+  role: 'tool';
+  toolName: string;
+  toolArgs?: Record<string, any>;
+  status: 'calling' | 'done' | 'error';
+  result?: any;
+  duration?: number;
+  error?: string;
+  timestamp: Date;
+  requestId: string;
+};
+
+type Message = UserMessage | AssistantMessage | ToolMessage;
 
 // Load messages from persistent storage on component creation
 const loadMessages = async (): Promise<Message[]> => {
@@ -267,10 +301,25 @@ const loadMessages = async (): Promise<Message[]> => {
       const parsed = JSON.parse(saved);
       // Only return saved messages if array is not empty
       if (parsed && parsed.length > 0) {
-        return parsed.map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp)
-        }));
+        // Filter out messages with invalid structure (from old format)
+        const validMessages = parsed.filter((msg: any) => {
+          // Tool messages must have toolName
+          if (msg.role === 'tool') {
+            return msg.toolName && msg.status;
+          }
+          // User and assistant messages must have content
+          if (msg.role === 'user' || msg.role === 'assistant') {
+            return msg.content !== undefined;
+          }
+          return false;
+        });
+        
+        if (validMessages.length > 0) {
+          return validMessages.map((msg: any) => ({
+            ...msg,
+            timestamp: new Date(msg.timestamp)
+          }));
+        }
       }
     }
     
@@ -406,23 +455,6 @@ const handleScroll = () => {
 };
 
 // Save messages to localStorage when they change
-watch(messages, (newMessages) => {
-  try {
-    // Don't save if we only have the default welcome message and no archived messages
-    // This prevents overwriting existing chat history on component reload
-    if (newMessages.length === 1 && 
-        newMessages[0].role === 'assistant' && 
-        newMessages[0].content.includes('Hallo! Ik ben Omni') &&
-        archivedMessages.value.length === 0) {
-      return;
-    }
-    
-    localStorage.setItem('omni-chat-messages', JSON.stringify(newMessages));
-  } catch (error) {
-    console.warn('Failed to save chat messages to localStorage:', error);
-  }
-}, { deep: true });
-
 // HMR detection and preservation
 if ((import.meta as any).hot) {
   onMounted(async () => {
@@ -535,11 +567,50 @@ commandHistory.value = loadCommandHistory();
 watch(messages, async (newMessages) => {
   try {
     // Convert messages to plain objects (serialize Date objects to strings)
-    const serializedMessages = newMessages.map(msg => ({
-      role: msg.role,
-      content: msg.content,
-      timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp
-    }));
+    // Persist ALL message types including tools
+    // SKIP streaming messages (not yet complete)
+    const serializedMessages = newMessages
+      .filter(msg => {
+        // Skip assistant messages that are still streaming
+        if (msg.role === 'assistant' && msg.isStreaming) {
+          return false;
+        }
+        return true;
+      })
+      .map(msg => {
+        if (msg.role === 'tool') {
+          // Deep clone to avoid circular references and convert to JSON-safe format
+          const safeArgs = msg.toolArgs ? JSON.parse(JSON.stringify(msg.toolArgs)) : undefined;
+          const safeResult = msg.result ? JSON.parse(JSON.stringify(msg.result)) : undefined;
+          
+          return {
+            role: msg.role,
+            toolName: msg.toolName,
+            toolArgs: safeArgs,
+            status: msg.status,
+            result: safeResult,
+            duration: msg.duration,
+            error: msg.error,
+            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp,
+            requestId: msg.requestId
+          };
+        } else if (msg.role === 'assistant') {
+          return {
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp,
+            requestId: msg.requestId,
+            // Don't save isStreaming - always false when loaded
+            // Skip tools/codeChanges/etc for now - only save content
+          };
+        } else {
+          return {
+            role: msg.role,
+            content: msg.content,
+            timestamp: msg.timestamp instanceof Date ? msg.timestamp.toISOString() : msg.timestamp
+          };
+        }
+      });
     
     // Save to localStorage for quick access
     localStorage.setItem('omni-chat-messages', JSON.stringify(serializedMessages));
@@ -726,8 +797,10 @@ const sendMessage = async () => {
       // Handle error response
       console.error('[ChatPanel] Chat error:', response.error);
       const lastMsg = messages.value[assistantMessageIndex];
-      lastMsg.content = `Error: ${response.error || 'Unknown error'}`;
-      lastMsg.isStreaming = false;
+      if (lastMsg.role === 'assistant') {
+        lastMsg.content = `Error: ${response.error || 'Unknown error'}`;
+        lastMsg.isStreaming = false;
+      }
       loading.value = false;
     }
     // If success, leave loading=true and let stream events handle completion
@@ -736,8 +809,10 @@ const sendMessage = async () => {
     
     // Handle exception
     const lastMsg = messages.value[assistantMessageIndex];
-    lastMsg.content = `Error: ${error?.message || 'Unknown error'}`;
-    lastMsg.isStreaming = false;
+    if (lastMsg.role === 'assistant') {
+      lastMsg.content = `Error: ${error?.message || 'Unknown error'}`;
+      lastMsg.isStreaming = false;
+    }
     loading.value = false;
   }
   // Don't set loading=false here - let stream complete event handle it
@@ -749,8 +824,11 @@ const sendMessage = async () => {
 // Streaming event handlers
 const handleStreamComplete = (requestId: string) => {
   // Find message and mark as complete
-  const message = messages.value.find(m => m.requestId === requestId);
-  if (message) {
+  const message = messages.value.find((m): m is AssistantMessage | ToolMessage => 
+    (m.role === 'assistant' || m.role === 'tool') && m.requestId === requestId
+  );
+  
+  if (message && message.role === 'assistant') {
     message.isStreaming = false;
     
     // Get ALL data from StreamingResponse and save it to the message
@@ -801,21 +879,105 @@ const handleStreamError = (error: any) => {
   loading.value = false;
 };
 
-// Global event handler reference (singleton pattern for HMR compatibility)
-// This ensures we don't create multiple listeners during hot reload
+// Global event handler reference and cleanup function
 let globalEventHandler: ((event: OmniEvent) => void) | null = null;
+let cleanupEventListener: (() => void) | null = null;
 
 // Setup streaming event listener
 const setupStreamingListener = () => {
+  // Clean up existing listener first (critical for hot reload!)
+  if (cleanupEventListener) {
+    console.log('[ChatPanel] Cleaning up old event listener');
+    cleanupEventListener();
+    cleanupEventListener = null;
+  }
+  
   if (window.electronAPI?.onChatEvent) {
-    // Remove old handler if it exists (hot reload cleanup)
-    if (globalEventHandler) {
-      // Note: Electron IPC doesn't provide removeListener, but we can overwrite
-    }
-    
     // Create new handler
     globalEventHandler = (event: OmniEvent) => {
-      // Forward ALL events to the StreamingResponse component
+      // Intercept tool events to create separate tool messages
+      if (event.type === 'tool_start') {
+        // Create a new tool message in "calling" state
+        const toolMessage: ToolMessage = {
+          role: 'tool',
+          toolName: event.data.name,
+          toolArgs: event.data.args,
+          status: 'calling',
+          timestamp: new Date(),
+          requestId: event.requestId
+        };
+        
+        // Insert after the last message with the same requestId
+        // Use reverse search to avoid findLastIndex (ES2023)
+        let lastIndex = -1;
+        for (let i = messages.value.length - 1; i >= 0; i--) {
+          const m = messages.value[i];
+          if ((m.role === 'assistant' || m.role === 'tool') && 
+              ('requestId' in m) && 
+              m.requestId === event.requestId) {
+            lastIndex = i;
+            break;
+          }
+        }
+        
+        if (lastIndex >= 0) {
+          messages.value.splice(lastIndex + 1, 0, toolMessage);
+        } else {
+          messages.value.push(toolMessage);
+        }
+        
+        console.log('[ChatPanel] Tool started:', event.data.name);
+        
+        // DON'T forward tool_start to StreamingResponse - we handle it here
+        return;
+      } else if (event.type === 'tool_result') {
+        // Find the corresponding tool message and update it
+        const toolMsg = messages.value.find((m): m is ToolMessage => 
+          m.role === 'tool' && 
+          m.requestId === event.requestId && 
+          m.toolName === event.data.name &&
+          m.status === 'calling'
+        );
+        
+        if (toolMsg) {
+          toolMsg.status = event.data.status === 'error' ? 'error' : 'done';
+          toolMsg.result = event.data.result;
+          toolMsg.error = event.data.error;
+          toolMsg.duration = event.data.duration;
+          
+          console.log('[ChatPanel] Tool completed:', event.data.name, toolMsg.status);
+        } else {
+          console.warn('[ChatPanel] No matching tool message found for tool_result:', event.data.name);
+        }
+        
+        // DON'T forward tool_result to StreamingResponse - we handle it here
+        return;
+      } else if (event.type === 'narrative_chunk') {
+        // Check if last message is a tool - if so, create NEW assistant message
+        const lastMsg = messages.value[messages.value.length - 1];
+        const needsNewMessage = lastMsg && lastMsg.role === 'tool';
+        
+        if (needsNewMessage) {
+          // Create a new assistant message for text AFTER the tool
+          messages.value.push({
+            role: 'assistant',
+            content: '',
+            timestamp: new Date(),
+            requestId: event.requestId,
+            isStreaming: true
+          });
+          console.log('[ChatPanel] Created new AssistantMessage after tool');
+        }
+        
+        // Forward to StreamingResponse (which will append to the assistant message)
+        const responseRef = streamingResponseRefs.value[event.requestId];
+        if (responseRef && responseRef.handleEvent) {
+          responseRef.handleEvent(event);
+        }
+        return;
+      }
+      
+      // Forward all other events to the StreamingResponse component
       // (including response_complete, which triggers the @complete event)
       const responseRef = streamingResponseRefs.value[event.requestId];
       if (responseRef && responseRef.handleEvent) {
@@ -825,12 +987,22 @@ const setupStreamingListener = () => {
       }
     };
     
-    // Register the handler
-    window.electronAPI.onChatEvent(globalEventHandler);
+    // Register the handler and store cleanup function
+    cleanupEventListener = window.electronAPI.onChatEvent(globalEventHandler);
+    console.log('[ChatPanel] Event listener registered with cleanup');
   } else {
     console.warn('[ChatPanel] onChatEvent API not available');
   }
 };
+
+// Cleanup on component unmount
+onBeforeUnmount(() => {
+  if (cleanupEventListener) {
+    console.log('[ChatPanel] Component unmounting, cleaning up event listener');
+    cleanupEventListener();
+    cleanupEventListener = null;
+  }
+});
 
 const scrollToBottom = (force = false, instant = false) => {
   if (messagesContainer.value && (force || !userScrolledUp.value)) {
@@ -923,22 +1095,31 @@ const handleInlineChatSubmit = async (prompt: string, selection?: string) => {
 
     if (response.success) {
       // Use typewriter effect
-      await typewriterEffect(
-        response.message,
-        (partialText) => {
-          messages.value[assistantMessageIndex].content = partialText;
-        }
-      );
+      const msg = messages.value[assistantMessageIndex];
+      if (msg.role === 'assistant') {
+        await typewriterEffect(
+          response.message,
+          (partialText) => {
+            msg.content = partialText;
+          }
+        );
+      }
       
       await nextTick();
       scrollToBottom();
     } else {
-      messages.value[assistantMessageIndex].content = `❌ Fout: ${response.error}`;
+      const msg = messages.value[assistantMessageIndex];
+      if (msg.role === 'assistant') {
+        msg.content = `❌ Fout: ${response.error}`;
+      }
     }
   } catch (error) {
     console.error('Inline chat error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    messages.value[assistantMessageIndex].content = `❌ Fout: ${errorMessage}`;
+    const msg = messages.value[assistantMessageIndex];
+    if (msg.role === 'assistant') {
+      msg.content = `❌ Fout: ${errorMessage}`;
+    }
   } finally {
     loading.value = false;
   }
@@ -1225,7 +1406,7 @@ const parseMessageContent = (content: string): MessagePart[] => {
 }
 
 .message.user .message-content {
-  max-width: var(--chat-message-max-width, 70%);
+  max-width: var(--chat-message-max-width, 85%);
   padding: var(--space-3) var(--space-4);
   background: rgba(59, 130, 246, 0.1);
   color: var(--color-text-primary);
@@ -1241,9 +1422,20 @@ const parseMessageContent = (content: string): MessagePart[] => {
 
 .message.assistant .message-wrapper {
   display: flex;
-  gap: var(--space-3);
+  flex-direction: row;
+  gap: var(--space-2);
   width: 100%;
   max-width: var(--chat-message-max-width, 100%);
+  overflow: hidden; /* Prevent child overflow */
+  align-items: flex-start;
+}
+
+.message.assistant .message-bubble-container {
+  flex: 1;
+  min-width: 0; /* Allow flex child to shrink below content size */
+  overflow: hidden; /* Constrain children */
+  margin-left: 35px; /* Align with icon + gap */
+  margin-right: 35px; /* Match right margin with left for symmetry */
 }
 
 .message.assistant .message-icon {
@@ -1258,16 +1450,21 @@ const parseMessageContent = (content: string): MessagePart[] => {
   font-size: var(--font-size-lg);
   color: var(--color-white);
   box-shadow: var(--shadow-sm);
+  align-self: flex-start;
 }
 
 .message.assistant .message-content {
   flex: 1;
+  min-width: 0; /* Allow flex child to shrink below content size */
   padding: var(--space-3) var(--space-4);
   background: var(--color-bg-secondary);
   color: var(--color-text-primary);
   border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-lg);
   border: 1px solid var(--color-border-light);
   box-shadow: var(--shadow-xs);
+  overflow-x: hidden; /* Prevent horizontal overflow */
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .message.loading .message-content {
@@ -1547,11 +1744,15 @@ const parseMessageContent = (content: string): MessagePart[] => {
   flex-direction: column;
   gap: 1rem;
   width: 100%;
+  overflow-x: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 .preserved-response .narrative-section {
   line-height: 1.6;
   color: var(--color-text-primary);
+  overflow-x: hidden;
 }
 
 .preserved-response .narrative-section :deep(p) {

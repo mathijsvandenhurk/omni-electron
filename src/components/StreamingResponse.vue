@@ -361,6 +361,9 @@ defineExpose({
   color: var(--vscode-editor-foreground, #d4d4d4);
   border-radius: 6px;
   max-width: 100%;
+  overflow-x: hidden;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
 
 /* Metadata header */
