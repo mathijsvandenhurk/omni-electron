@@ -14,6 +14,9 @@ import time
 import asyncio
 from pathlib import Path
 import re
+import random
+from collections import deque
+from datetime import datetime, timedelta
 
 # Setup logging to stderr (not stdout - that's for JSON-RPC)
 logging.basicConfig(
@@ -22,6 +25,135 @@ logging.basicConfig(
     stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """
+    Production-grade rate limiter with exponential backoff, jitter, and circuit breaker.
+    
+    Based on research from:
+    - AWS: Exponential Backoff & Jitter (Full Jitter algorithm)
+    - Anthropic: Token bucket algorithm, retry-after headers
+    - OpenAI SDK: 2 retries default, 0.5-8s backoff range
+    """
+    
+    def __init__(self, 
+                 max_retries: int = 3,
+                 initial_delay: float = 1.0,
+                 max_delay: float = 60.0,
+                 circuit_breaker_threshold: int = 5,
+                 circuit_breaker_timeout: float = 120.0):
+        """
+        Initialize rate limiter with exponential backoff and circuit breaker.
+        
+        Args:
+            max_retries: Maximum number of retry attempts (default: 3)
+            initial_delay: Initial retry delay in seconds (default: 1.0)
+            max_delay: Maximum retry delay in seconds (default: 60.0)
+            circuit_breaker_threshold: Consecutive failures before circuit opens (default: 5)
+            circuit_breaker_timeout: Seconds before circuit half-opens (default: 120.0)
+        """
+        self.max_retries = max_retries
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        
+        # Circuit breaker state
+        self.circuit_breaker_threshold = circuit_breaker_threshold
+        self.circuit_breaker_timeout = circuit_breaker_timeout
+        self.consecutive_failures = 0
+        self.circuit_open_until = None
+        
+        # Request timing (for adaptive rate limiting)
+        self.request_history = deque(maxlen=100)  # Last 100 requests
+        
+    def is_circuit_open(self) -> bool:
+        """Check if circuit breaker is open (preventing requests)."""
+        if self.circuit_open_until is None:
+            return False
+        
+        if datetime.now() >= self.circuit_open_until:
+            # Circuit half-open: allow test request
+            logger.info("[RateLimiter] Circuit breaker half-open, allowing test request")
+            self.circuit_open_until = None
+            return False
+        
+        return True
+    
+    def record_success(self):
+        """Record successful request."""
+        self.consecutive_failures = 0
+        self.request_history.append((datetime.now(), True))
+    
+    def record_failure(self):
+        """Record failed request and potentially open circuit."""
+        self.consecutive_failures += 1
+        self.request_history.append((datetime.now(), False))
+        
+        if self.consecutive_failures >= self.circuit_breaker_threshold:
+            self.circuit_open_until = datetime.now() + timedelta(seconds=self.circuit_breaker_timeout)
+            logger.warning(
+                f"[RateLimiter] Circuit breaker OPEN after {self.consecutive_failures} failures. "
+                f"Will retry after {self.circuit_breaker_timeout}s"
+            )
+    
+    def calculate_backoff(self, retry_count: int, retry_after: float | None = None) -> float:
+        """
+        Calculate backoff delay using Full Jitter algorithm (AWS best practice).
+        
+        Args:
+            retry_count: Current retry attempt (0-indexed)
+            retry_after: Optional retry-after value from API response headers
+        
+        Returns:
+            Delay in seconds before next retry
+        """
+        # If API provides retry-after header, respect it (with reasonable bounds)
+        if retry_after is not None and 0 < retry_after <= 300:
+            logger.info(f"[RateLimiter] Using API retry-after: {retry_after}s")
+            return retry_after
+        
+        # Exponential backoff: delay = min(initial_delay * 2^retry_count, max_delay)
+        exponential_delay = min(
+            self.initial_delay * (2 ** retry_count),
+            self.max_delay
+        )
+        
+        # Full Jitter: randomly select delay between 0 and exponential_delay
+        # This prevents thundering herd problem (AWS research shows 50%+ work reduction)
+        jittered_delay = random.uniform(0, exponential_delay)
+        
+        logger.info(
+            f"[RateLimiter] Retry {retry_count + 1}/{self.max_retries}: "
+            f"exponential={exponential_delay:.1f}s, jittered={jittered_delay:.1f}s"
+        )
+        
+        return jittered_delay
+    
+    def get_request_rate(self) -> float:
+        """Calculate current request rate (requests per minute)."""
+        if len(self.request_history) < 2:
+            return 0.0
+        
+        now = datetime.now()
+        one_minute_ago = now - timedelta(minutes=1)
+        
+        recent_requests = sum(
+            1 for timestamp, _ in self.request_history
+            if timestamp >= one_minute_ago
+        )
+        
+        return recent_requests
+
+
+# Global rate limiter instance
+rate_limiter = RateLimiter(
+    max_retries=3,           # 3 retries (4 total attempts)
+    initial_delay=2.0,       # Start with 2s delay (safer than 1s for 429s)
+    max_delay=60.0,          # Cap at 60s
+    circuit_breaker_threshold=5,
+    circuit_breaker_timeout=120.0
+)
+
 
 def send_progress(message: str):
     """Send progress update to frontend via stderr"""
@@ -423,102 +555,252 @@ class OmniBackend:
                 # NOTE: Tool choice forcing removed - caused 400 Bad Request errors
                 # Instead, we rely on the guidance prompt injection (below) to redirect behavior
                 
-                # Stream from LLM (async)
-                tool_uses = []
+                # ============================================================================
+                # CHRONOLOGICAL DISPLAY IMPLEMENTATION (Industry Standard Pattern)
+                # ============================================================================
+                # Based on research of VS Code Copilot, Continue.dev, AutoGPT, and Anthropic API docs:
+                #
+                # OLD FLOW (Batched):
+                #   1. Stream ALL narrative chunks first
+                #   2. Collect tool_uses in array
+                #   3. Execute tools AFTER streaming completes
+                #   Result: text → text → text → tool → tool → tool
+                #
+                # NEW FLOW (Chronological):
+                #   1. Stream narrative chunk → emit immediately
+                #   2. Tool_use block complete → execute IMMEDIATELY → emit result
+                #   3. Stream more narrative → emit immediately
+                #   4. Tool_use block complete → execute IMMEDIATELY → emit result
+                #   Result: text → tool → text → tool (chronological order!)
+                #
+                # Benefits:
+                #   ✓ Matches industry standard (VS Code/Copilot pattern)
+                #   ✓ Better UX: user sees what's happening in real-time
+                #   ✓ Natural interleaving as Anthropic API supports it
+                #   ✓ No frontend breaking changes needed
+                # ============================================================================
+                
+                # Stream from LLM (async) with retry logic for rate limits
+                tool_uses = []  # Track all tool uses for conversation history
+                tool_results = []  # Track all tool results for conversation history
                 current_tool_use = None
                 current_text_block = ""
                 assistant_content = []  # Build assistant message content
                 
-                async for event in self.llm.stream_with_tools(
-                    messages=messages,
-                    tools=tools,
-                    max_tokens=4096,
-                    temperature=0.7,
-                    timeout=300
-                ):
-                    event_type = event.get('event_type', '')
+                # Retry loop with exponential backoff for rate limit handling
+                retry_count = 0
+                last_error = None
+                streaming_success = False
+                
+                while retry_count <= rate_limiter.max_retries and not streaming_success:
+                    # Check circuit breaker
+                    if rate_limiter.is_circuit_open():
+                        error_msg = "Circuit breaker open - too many consecutive failures. Aborting to prevent cascading failures."
+                        logger.error(f"[RateLimiter] {error_msg}")
+                        raise Exception(error_msg)
                     
-                    if event_type == 'message_start':
-                        logger.debug("[Streaming] Message start")
+                    try:
+                        # Attempt LLM streaming
+                        async for event in self.llm.stream_with_tools(
+                            messages=messages,
+                            tools=tools,
+                            max_tokens=4096,
+                            temperature=0.7,
+                            timeout=300
+                        ):
+                            event_type = event.get('event_type', '')
                         
-                    elif event_type == 'content_block_start':
-                        content_block = event.get('content_block', {})
-                        block_type = content_block.get('type')
+                            if event_type == 'message_start':
+                                logger.debug("[Streaming] Message start")
+                                
+                            elif event_type == 'content_block_start':
+                                content_block = event.get('content_block', {})
+                                block_type = content_block.get('type')
+                                
+                                if block_type == 'text':
+                                    logger.debug("[Streaming] Text block start")
+                                    current_text_block = ""
+                                    
+                                elif block_type == 'tool_use':
+                                    tool_name = content_block.get('name')
+                                    tool_id = content_block.get('id')
+                                    logger.info(f"[Streaming] Tool use start: {tool_name}")
+                                    
+                                    current_tool_use = {
+                                        'id': tool_id,
+                                        'name': tool_name,
+                                        'input': {}
+                                    }
+                            
+                            elif event_type == 'content_block_delta':
+                                delta = event.get('delta', {})
+                                delta_type = delta.get('type')
+                                
+                                if delta_type == 'text_delta':
+                                    text = delta.get('text', '')
+                                    current_text_block += text
+                                    accumulated_text += text
+                                    
+                                    # Emit narrative chunk
+                                    handler.emit_narrative_chunk(text, is_markdown=True)
+                                    
+                                elif delta_type == 'input_json_delta':
+                                    # Tool parameter streaming
+                                    partial_json = delta.get('partial_json', '')
+                                    if current_tool_use:
+                                        # Accumulate JSON (we'll parse when complete)
+                                        if 'partial_json' not in current_tool_use:
+                                            current_tool_use['partial_json'] = ''
+                                        current_tool_use['partial_json'] += partial_json
+                            
+                            elif event_type == 'content_block_stop':
+                                if current_text_block:
+                                    logger.debug(f"[Streaming] Text block complete: {len(current_text_block)} chars")
+                                    # Add text block to assistant content
+                                    assistant_content.append({
+                                        "type": "text",
+                                        "text": current_text_block
+                                    })
+                                    current_text_block = ""
+                                    
+                                if current_tool_use:
+                                    # Parse accumulated JSON
+                                    try:
+                                        if 'partial_json' in current_tool_use:
+                                            current_tool_use['input'] = json.loads(current_tool_use['partial_json'])
+                                            del current_tool_use['partial_json']
+                                    except json.JSONDecodeError as e:
+                                        logger.error(f"[Streaming] Failed to parse tool input JSON: {e}")
+                                        current_tool_use['input'] = {}
+                                    
+                                    # Add tool_use block to assistant content
+                                    assistant_content.append({
+                                        "type": "tool_use",
+                                        "id": current_tool_use['id'],
+                                        "name": current_tool_use['name'],
+                                        "input": current_tool_use['input']
+                                    })
+                                    
+                                    tool_uses.append(current_tool_use)
+                                    
+                                    # === CHRONOLOGICAL DISPLAY: Execute tool IMMEDIATELY ===
+                                    # This creates interleaved display: text → tool → text → tool
+                                    # Instead of batched: text → text → tool → tool
+                                    tool_name = current_tool_use['name']
+                                    tool_args = current_tool_use['input']
+                                    tool_id = current_tool_use['id']
+                                    
+                                    # Emit tool start event (for UI)
+                                    handler.emit_tool_start(tool_name, tool_args)
+                                    
+                                    # Track tool types for adaptive iteration management
+                                    if tool_name in ['replace_in_file', 'write_file']:
+                                        write_tools_executed.add(tool_name)
+                                        read_tool_count = 0  # Reset read counter
+                                    elif tool_name in ['read_file', 'search_in_file', 'list_files']:
+                                        read_tool_count += 1
+                                    
+                                    # Execute tool immediately
+                                    logger.info(f"[Tool] Executing {tool_name} with args: {tool_args}")
+                                    tool_start_time = time.time()
+                                    try:
+                                        result = self._execute_tool(tool_name, tool_args)
+                                        tool_duration = time.time() - tool_start_time
+                                        handler.emit_tool_result(tool_name, result, status='success', duration=tool_duration)
+                                        
+                                        # Store result for conversation history
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_id,
+                                            "content": json.dumps(result) if not isinstance(result, str) else result
+                                        })
+                                        
+                                    except Exception as tool_error:
+                                        tool_duration = time.time() - tool_start_time
+                                        error_msg = f"Tool execution failed: {str(tool_error)}"
+                                        logger.error(f"[Tool] {error_msg}")
+                                        handler.emit_tool_result(
+                                            tool_name, 
+                                            {'success': False, 'error': error_msg},
+                                            status='error',
+                                            duration=tool_duration,
+                                            error=error_msg
+                                        )
+                                        
+                                        # Store error result
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_id,
+                                            "content": error_msg,
+                                            "is_error": True
+                                        })
+                                    
+                                    current_tool_use = None
+                            
+                            elif event_type == 'message_delta':
+                                # Usage updates, stop_reason, etc.
+                                pass
+                            
+                            elif event_type == 'message_stop':
+                                logger.info("[Streaming] Message complete")
+                                break
                         
-                        if block_type == 'text':
-                            logger.debug("[Streaming] Text block start")
-                            current_text_block = ""
-                            
-                        elif block_type == 'tool_use':
-                            tool_name = content_block.get('name')
-                            tool_id = content_block.get('id')
-                            logger.info(f"[Streaming] Tool use start: {tool_name}")
-                            
-                            current_tool_use = {
-                                'id': tool_id,
-                                'name': tool_name,
-                                'input': {}
-                            }
-                    
-                    elif event_type == 'content_block_delta':
-                        delta = event.get('delta', {})
-                        delta_type = delta.get('type')
+                        # If we reach here, streaming succeeded
+                        streaming_success = True
+                        rate_limiter.record_success()
+                        logger.info(f"[RateLimiter] Request successful (RPM: {rate_limiter.get_request_rate():.1f})")
                         
-                        if delta_type == 'text_delta':
-                            text = delta.get('text', '')
-                            current_text_block += text
-                            accumulated_text += text
+                    except Exception as e:
+                        last_error = e
+                        error_str = str(e)
+                        
+                        # Check if this is a rate limit error (429)
+                        is_rate_limit = "rate_limit" in error_str.lower() or "429" in error_str
+                        
+                        if is_rate_limit and retry_count < rate_limiter.max_retries:
+                            rate_limiter.record_failure()
                             
-                            # Emit narrative chunk
-                            handler.emit_narrative_chunk(text, is_markdown=True)
-                            
-                        elif delta_type == 'input_json_delta':
-                            # Tool parameter streaming
-                            partial_json = delta.get('partial_json', '')
-                            if current_tool_use:
-                                # Accumulate JSON (we'll parse when complete)
-                                if 'partial_json' not in current_tool_use:
-                                    current_tool_use['partial_json'] = ''
-                                current_tool_use['partial_json'] += partial_json
-                    
-                    elif event_type == 'content_block_stop':
-                        if current_text_block:
-                            logger.debug(f"[Streaming] Text block complete: {len(current_text_block)} chars")
-                            # Add text block to assistant content
-                            assistant_content.append({
-                                "type": "text",
-                                "text": current_text_block
-                            })
-                            current_text_block = ""
-                            
-                        if current_tool_use:
-                            # Parse accumulated JSON
+                            # Try to extract retry-after header from error
+                            retry_after = None
                             try:
-                                if 'partial_json' in current_tool_use:
-                                    current_tool_use['input'] = json.loads(current_tool_use['partial_json'])
-                                    del current_tool_use['partial_json']
-                            except json.JSONDecodeError as e:
-                                logger.error(f"[Streaming] Failed to parse tool input JSON: {e}")
-                                current_tool_use['input'] = {}
+                                if hasattr(e, 'response'):
+                                    response = getattr(e, 'response')
+                                    if hasattr(response, 'headers'):
+                                        headers = getattr(response, 'headers')
+                                        retry_after_header = headers.get('retry-after') or headers.get('Retry-After')
+                                        if retry_after_header:
+                                            retry_after = float(retry_after_header)
+                            except (ValueError, AttributeError, TypeError):
+                                # Could be HTTP date format or invalid, ignore
+                                pass
                             
-                            # Add tool_use block to assistant content
-                            assistant_content.append({
-                                "type": "tool_use",
-                                "id": current_tool_use['id'],
-                                "name": current_tool_use['name'],
-                                "input": current_tool_use['input']
-                            })
+                            # Calculate backoff with jitter
+                            backoff_delay = rate_limiter.calculate_backoff(retry_count, retry_after)
                             
-                            tool_uses.append(current_tool_use)
-                            current_tool_use = None
-                    
-                    elif event_type == 'message_delta':
-                        # Usage updates, stop_reason, etc.
-                        pass
-                    
-                    elif event_type == 'message_stop':
-                        logger.info("[Streaming] Message complete")
-                        break
+                            logger.warning(
+                                f"[RateLimiter] Rate limit hit (429) on iteration {iteration}. "
+                                f"Retry {retry_count + 1}/{rate_limiter.max_retries} after {backoff_delay:.1f}s backoff"
+                            )
+                            
+                            # Emit progress update to user
+                            handler.emit_narrative_chunk(
+                                f"\n\n⏳ *Rate limit bereikt. Wacht {backoff_delay:.0f} seconden...*\n\n",
+                                is_markdown=True
+                            )
+                            
+                            # Sleep with backoff
+                            await asyncio.sleep(backoff_delay)
+                            
+                            retry_count += 1
+                        else:
+                            # Not a rate limit error, or max retries exceeded
+                            if is_rate_limit:
+                                logger.error(f"[RateLimiter] Max retries ({rate_limiter.max_retries}) exceeded for rate limit")
+                            raise  # Re-raise the exception
+                
+                # If we exhausted retries without success, raise the last error
+                if not streaming_success and last_error:
+                    raise last_error
                 
                 # If no tools were called, we're done
                 if not tool_uses:
@@ -532,59 +814,9 @@ class OmniBackend:
                 })
                 logger.info(f"[Streaming] Added assistant message with {len(assistant_content)} blocks (text + tool_use)")
                 
-                # Execute tools and track progress
-                tool_results = []
-                for tool_use in tool_uses:
-                    tool_name = tool_use['name']
-                    tool_args = tool_use['input']
-                    tool_id = tool_use['id']
-                    
-                    # Track tool types for adaptive iteration management
-                    if tool_name in ['replace_in_file', 'write_file']:
-                        write_tools_executed.add(tool_name)
-                        read_tool_count = 0  # Reset read counter when we do a write
-                    elif tool_name in ['read_file', 'search_in_file', 'list_files']:
-                        read_tool_count += 1
-                    
-                    logger.info(f"[Streaming] Executing tool: {tool_name} with args: {tool_args}")
-                    
-                    # Emit tool start event
-                    handler.emit_tool_start(tool_name, tool_args)
-                    
-                    # Execute tool
-                    start_time = time.time()
-                    try:
-                        result = self._execute_tool(tool_name, tool_args)
-                        duration = time.time() - start_time
-                        
-                        if result.get('error'):
-                            status = 'error'
-                            error_msg = result['error']
-                            logger.error(f"[Streaming] Tool {tool_name} failed: {error_msg}")
-                            handler.emit_tool_result(tool_name, result, status, duration, error=error_msg)
-                        else:
-                            status = 'success'
-                            logger.info(f"[Streaming] Tool {tool_name} success in {duration:.2f}s")
-                            handler.emit_tool_result(tool_name, result, status, duration)
-                        
-                        # Build tool result for next LLM call
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": json.dumps(result)
-                        })
-                        
-                    except Exception as e:
-                        duration = time.time() - start_time
-                        error_msg = str(e)
-                        logger.error(f"[Streaming] Tool {tool_name} exception: {error_msg}")
-                        handler.emit_tool_result(tool_name, {'error': error_msg}, 'error', duration, error=error_msg)
-                        
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": json.dumps({"error": error_msg})
-                        })
+                # NOTE: Tools were already executed during streaming (chronological display)
+                # tool_results list already populated with results
+                logger.info(f"[Streaming] Tools executed during streaming: {len(tool_results)} results")
                 
                 # ADAPTIVE ITERATION EXTENSION: Extend limit if we're making progress toward task completion
                 # Add tool results to conversation for next iteration

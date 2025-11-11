@@ -74,7 +74,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch, onMounted } from 'vue';
 import type { ToolExecution } from '../types/events';
 
 interface Props {
@@ -89,10 +89,26 @@ const props = withDefaults(defineProps<Props>(), {
 // State
 const expandedTools = ref<Set<number>>(new Set());
 
-// Auto-expand first tool if defaultExpanded
-if (props.defaultExpanded && props.tools.length > 0) {
-  expandedTools.value.add(0);
+// Function to expand all tools if defaultExpanded is true
+function initializeExpanded() {
+  if (props.defaultExpanded && props.tools.length > 0) {
+    // Expand ALL tools, not just the first one
+    expandedTools.value.clear();
+    for (let i = 0; i < props.tools.length; i++) {
+      expandedTools.value.add(i);
+    }
+  }
 }
+
+// Initialize on mount
+onMounted(() => {
+  initializeExpanded();
+});
+
+// Watch for changes in tools or defaultExpanded prop
+watch([() => props.tools, () => props.defaultExpanded], () => {
+  initializeExpanded();
+}, { immediate: true });
 
 // Methods
 function toggleTool(index: number) {
